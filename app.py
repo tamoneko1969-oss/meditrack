@@ -371,6 +371,9 @@ def init_db() -> None:
         f"""CREATE TABLE IF NOT EXISTS scanned_products_log (
             id {pk}, product_name TEXT NOT NULL, ingredients_text TEXT,
             ai_verdict TEXT NOT NULL, analysis_reason TEXT, timestamp TEXT NOT NULL)""",
+        f"""CREATE TABLE IF NOT EXISTS user_profile (
+            id INTEGER PRIMARY KEY, age INTEGER, height_cm INTEGER,
+            weight_kg {real}, sex TEXT, updated_at TEXT)""",
     ]
     conn = get_conn()
     try:
@@ -443,6 +446,38 @@ def vitals_series(days: int):
         "SELECT * FROM user_vitals WHERE timestamp >= ? ORDER BY timestamp ASC",
         (since,),
     )
+
+
+def get_profile():
+    """Lični profil korisnika (godine, visina, težina, pol) — jedan red (id=1)."""
+    return q_one("SELECT * FROM user_profile WHERE id = 1")
+
+
+def save_profile(age, height_cm, weight_kg, sex) -> None:
+    q_exec(
+        """INSERT INTO user_profile (id, age, height_cm, weight_kg, sex, updated_at)
+           VALUES (1, ?, ?, ?, ?, ?)
+           ON CONFLICT (id) DO UPDATE SET age=excluded.age,
+             height_cm=excluded.height_cm, weight_kg=excluded.weight_kg,
+             sex=excluded.sex, updated_at=excluded.updated_at""",
+        (age, height_cm, weight_kg, sex, datetime.now().isoformat()),
+    )
+
+
+def compute_bmi(height_cm, weight_kg):
+    """Vraća (bmi, kategorija) ili (None, '') ako nema podataka."""
+    if not height_cm or not weight_kg:
+        return (None, "")
+    bmi = weight_kg / ((height_cm / 100) ** 2)
+    if bmi < 18.5:
+        cat = "pothranjenost"
+    elif bmi < 25:
+        cat = "normalna težina"
+    elif bmi < 30:
+        cat = "prekomerna težina"
+    else:
+        cat = "gojaznost"
+    return (round(bmi, 1), cat)
 
 
 # --------------------------------------------------------------------------- #
@@ -551,10 +586,23 @@ def _parse_json(raw: str) -> dict:
 
 
 def build_health_context() -> str:
-    """Skuplja kompletan zdravstveni kontekst korisnika za AI ukrštanje."""
+    """Skuplja kompletan zdravstveni kontekst korisnika za AI ukrštanje.
+    Lični profil (godine/visina/težina/BMI) je OBAVEZAN okvir za svaki savet."""
+    p = get_profile()
     v = latest_vitals()
     dx = active_diagnoses()
     labs = latest_labs()
+
+    if p and (p["age"] or p["height_cm"] or p["weight_kg"]):
+        bmi, cat = compute_bmi(p["height_cm"], p["weight_kg"])
+        prof = (
+            f"godine: {p['age'] or '—'}, visina: {p['height_cm'] or '—'} cm, "
+            f"težina: {p['weight_kg'] or '—'} kg, pol: {p['sex'] or '—'}, "
+            f"BMI: {bmi if bmi else '—'}"
+            + (f" ({cat})" if cat else "")
+        )
+    else:
+        prof = "NIJE UNET — zatraži od korisnika da popuni Profil za precizniji savet"
 
     bp = "nije zabeležen"
     if v and v["blood_pressure_sys"]:
@@ -569,10 +617,14 @@ def build_health_context() -> str:
     )
     hr = v["heart_rate"] if v else "—"
     return (
+        f"LIČNI PROFIL (OBAVEZNO uzeti u obzir za SVAKI savet, dozu, normu i procenu): {prof}\n"
         f"KRVNI PRITISAK (poslednji): {bp}\n"
         f"PULS U MIROVANJU: {hr} bpm\n"
         f"AKTIVNE DIJAGNOZE: {dx_list}\n"
-        f"LABORATORIJSKI NALAZI (poslednji): {lab_list}"
+        f"LABORATORIJSKI NALAZI (poslednji): {lab_list}\n"
+        f"PRAVILO: Svaku procenu, preporuku i pretragu prilagodi OVOM osobi — "
+        f"njenim godinama, telesnoj masi (BMI) i polu. Norme i porcije računaj po "
+        f"kg telesne mase gde je relevantno. Ne daj generičke savete."
     )
 
 
@@ -887,9 +939,10 @@ api_ready = bool(api_key)
 # --------------------------------------------------------------------------- #
 #  Navigacija
 # --------------------------------------------------------------------------- #
-nav = st.columns(5)
-labels = ["🏠 Dashboard", "📷 Smart Camera", "📈 Trendovi", "✍️ Unos podataka", "🗂️ Istorija"]
-views = ["Dashboard", "Smart Camera", "Trendovi", "Unos podataka", "Istorija"]
+nav = st.columns(6)
+labels = ["🏠 Dashboard", "📷 Smart Camera", "📈 Trendovi", "👤 Profil",
+          "✍️ Unos podataka", "🗂️ Istorija"]
+views = ["Dashboard", "Smart Camera", "Trendovi", "Profil", "Unos podataka", "Istorija"]
 for col, lab, vw in zip(nav, labels, views):
     with col:
         kind = "primary" if st.session_state["view"] == vw else "secondary"
@@ -1292,6 +1345,49 @@ def _parse_reading_dt(res: dict) -> datetime:
 
 
 # =========================================================================== #
+#  VIEW: PROFIL (lični podaci — obavezni okvir za sve AI procene)
+# =========================================================================== #
+def render_profile():
+    st.markdown("## 👤 Moj profil")
+    st.caption("Ovi podaci su **obavezan okvir za sve AI procene** — svaki savet, doza, "
+               "norma i pretraga računaju se baš za tebe (godine, telesna masa, BMI, pol).")
+    p = get_profile()
+    sex_opts = ["—", "muški", "ženski"]
+
+    with st.form("profile_form"):
+        c1, c2 = st.columns(2)
+        age = c1.number_input("Godine starosti", 0, 120,
+                              int(p["age"]) if p and p["age"] else 30)
+        sex = c2.selectbox("Pol", sex_opts,
+                           index=sex_opts.index(p["sex"]) if p and p["sex"] in sex_opts else 0)
+        c3, c4 = st.columns(2)
+        height = c3.number_input("Visina (cm)", 0, 250,
+                                 int(p["height_cm"]) if p and p["height_cm"] else 175)
+        weight = c4.number_input("Težina (kg)", 0.0, 400.0,
+                                 float(p["weight_kg"]) if p and p["weight_kg"] else 80.0,
+                                 step=0.5, format="%.1f")
+        if st.form_submit_button("💾 Sačuvaj profil", type="primary"):
+            save_profile(age or None, height or None, weight or None,
+                         None if sex == "—" else sex)
+            st.success("Profil sačuvan — AI ga od sada uzima u obzir u svemu.")
+            st.rerun()
+
+    # BMI kartica iz sačuvanog profila
+    p = get_profile()
+    if p and p["height_cm"] and p["weight_kg"]:
+        bmi, cat = compute_bmi(p["height_cm"], p["weight_kg"])
+        col = (VERDICT["GREEN"] if cat == "normalna težina"
+               else VERDICT["RED"] if cat == "gojaznost" else VERDICT["YELLOW"])
+        st.markdown(
+            f"<div class='mt-card'><div class='mt-muted'>INDEKS TELESNE MASE (BMI)</div>"
+            f"<div style='font-size:2rem;font-weight:900;color:{col}'>{bmi} "
+            f"<span style='font-size:1rem;color:{col}'>· {cat}</span></div></div>",
+            unsafe_allow_html=True)
+    else:
+        st.info("Popuni i sačuvaj profil — bez ovih podataka AI daje generičke procene.")
+
+
+# =========================================================================== #
 #  VIEW: UNOS PODATAKA
 # =========================================================================== #
 def render_entry():
@@ -1474,6 +1570,8 @@ elif view == "Smart Camera":
     render_camera()
 elif view == "Trendovi":
     render_trends()
+elif view == "Profil":
+    render_profile()
 elif view == "Unos podataka":
     render_entry()
 else:
