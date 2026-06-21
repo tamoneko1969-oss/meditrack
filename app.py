@@ -284,84 +284,130 @@ def mini_ring_svg(percent: float, color: str, label: str = "", size: int = 50) -
 
 
 # --------------------------------------------------------------------------- #
-#  SQLite sloj — lokalna, offline-first baza (4 tabele iz arhitekture)
+#  Sloj baze — TRAJNI Postgres (Supabase) na cloud-u, SQLite lokalno.
+#  Aktivira se Postgres ako postoji DATABASE_URL (env ili Streamlit secrets);
+#  inače radi lokalni SQLite fajl. Isti SQL (`?` placeholderi) za oba.
 # --------------------------------------------------------------------------- #
-def get_db() -> sqlite3.Connection:
+def _db_url() -> str:
+    url = os.environ.get("DATABASE_URL", "").strip()
+    if url:
+        return url
+    try:
+        return str(st.secrets.get("DATABASE_URL", "") or "").strip()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+DATABASE_URL = _db_url()
+IS_PG = DATABASE_URL.startswith(("postgres://", "postgresql://"))
+
+
+def get_conn():
+    if IS_PG:
+        import psycopg2  # lazy — potrebno samo na cloud-u
+        return psycopg2.connect(DATABASE_URL, sslmode="require")
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
 
+def _q(sql: str, params: tuple, fetch: str | None):
+    """Jedinstveni izvršilac upita za oba backenda. fetch: 'all'|'one'|None."""
+    conn = get_conn()
+    try:
+        if IS_PG:
+            import psycopg2.extras
+            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur.execute(sql.replace("?", "%s"), params)
+        else:
+            cur = conn.cursor()
+            cur.execute(sql, params)
+        res = cur.fetchall() if fetch == "all" else (cur.fetchone() if fetch == "one" else None)
+        conn.commit()
+        return res
+    finally:
+        conn.close()
+
+
+def q_all(sql: str, args: tuple = ()):
+    return _q(sql, args, "all")
+
+
+def q_one(sql: str, args: tuple = ()):
+    return _q(sql, args, "one")
+
+
+def q_exec(sql: str, args: tuple = ()) -> None:
+    _q(sql, args, None)
+
+
+def q_execmany(sql: str, seq) -> None:
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.executemany(sql.replace("?", "%s") if IS_PG else sql, list(seq))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def init_db() -> None:
-    with get_db() as db:
-        db.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS user_vitals (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                heart_rate INTEGER, sleep_duration INTEGER,
-                deep_sleep_duration INTEGER, rem_sleep_duration INTEGER,
-                restless_count INTEGER, stress_level INTEGER,
-                blood_pressure_sys INTEGER, blood_pressure_dia INTEGER,
-                timestamp TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS medical_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                diagnosis_name TEXT NOT NULL, doctor_report_text TEXT,
-                date_diagnosed TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active'
-            );
-            CREATE TABLE IF NOT EXISTS lab_results (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                parameter_name TEXT NOT NULL, value REAL NOT NULL,
-                unit TEXT NOT NULL, reference_range TEXT, test_date TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS scanned_products_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                product_name TEXT NOT NULL, ingredients_text TEXT,
-                ai_verdict TEXT NOT NULL, analysis_reason TEXT, timestamp TEXT NOT NULL
-            );
-            """
-        )
+    pk = "SERIAL PRIMARY KEY" if IS_PG else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    real = "DOUBLE PRECISION" if IS_PG else "REAL"
+    stmts = [
+        f"""CREATE TABLE IF NOT EXISTS user_vitals (
+            id {pk}, heart_rate INTEGER, sleep_duration INTEGER,
+            deep_sleep_duration INTEGER, rem_sleep_duration INTEGER,
+            restless_count INTEGER, stress_level INTEGER,
+            blood_pressure_sys INTEGER, blood_pressure_dia INTEGER,
+            timestamp TEXT NOT NULL)""",
+        f"""CREATE TABLE IF NOT EXISTS medical_history (
+            id {pk}, diagnosis_name TEXT NOT NULL, doctor_report_text TEXT,
+            date_diagnosed TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active')""",
+        f"""CREATE TABLE IF NOT EXISTS lab_results (
+            id {pk}, parameter_name TEXT NOT NULL, value {real} NOT NULL,
+            unit TEXT NOT NULL, reference_range TEXT, test_date TEXT NOT NULL)""",
+        f"""CREATE TABLE IF NOT EXISTS scanned_products_log (
+            id {pk}, product_name TEXT NOT NULL, ingredients_text TEXT,
+            ai_verdict TEXT NOT NULL, analysis_reason TEXT, timestamp TEXT NOT NULL)""",
+    ]
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        for s in stmts:
+            cur.execute(s)
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def seed_demo_data() -> None:
     """Ubacuje primer podataka da Dashboard ne bude prazan na prvom startu."""
-    with get_db() as db:
-        now = datetime.now().isoformat()
-        db.execute(
-            """INSERT INTO user_vitals (heart_rate,sleep_duration,deep_sleep_duration,
-               rem_sleep_duration,restless_count,stress_level,blood_pressure_sys,
-               blood_pressure_dia,timestamp) VALUES (?,?,?,?,?,?,?,?,?)""",
-            (58, 378, 92, 124, 3, 32, 145, 95, now),
-        )
-        db.executemany(
-            """INSERT INTO medical_history (diagnosis_name,doctor_report_text,
-               date_diagnosed,status) VALUES (?,?,?,?)""",
-            [
-                ("Hipertenzija", "Granična, pod kontrolom dijetom.", "2024-09-01", "active"),
-                ("Deficit gvožđa", "Blaga sideropenija.", "2025-02-14", "active"),
-            ],
-        )
-        db.executemany(
-            """INSERT INTO lab_results (parameter_name,value,unit,reference_range,test_date)
-               VALUES (?,?,?,?,?)""",
-            [
-                ("Glukoza", 5.1, "mmol/L", "3.9-5.5", "2025-05-20"),
-                ("Natrijum", 138, "mmol/L", "136-145", "2025-05-20"),
-                ("Gvožđe", 9.2, "µmol/L", "11-28", "2025-05-20"),
-                ("Holesterol", 5.6, "mmol/L", "<5.2", "2025-05-20"),
-            ],
-        )
-
-
-def q_all(sql: str, args: tuple = ()) -> list[sqlite3.Row]:
-    with get_db() as db:
-        return db.execute(sql, args).fetchall()
-
-
-def q_one(sql: str, args: tuple = ()):
-    with get_db() as db:
-        return db.execute(sql, args).fetchone()
+    q_exec(
+        """INSERT INTO user_vitals (heart_rate,sleep_duration,deep_sleep_duration,
+           rem_sleep_duration,restless_count,stress_level,blood_pressure_sys,
+           blood_pressure_dia,timestamp) VALUES (?,?,?,?,?,?,?,?,?)""",
+        (58, 378, 92, 124, 3, 32, 145, 95, datetime.now().isoformat()),
+    )
+    q_execmany(
+        """INSERT INTO medical_history (diagnosis_name,doctor_report_text,
+           date_diagnosed,status) VALUES (?,?,?,?)""",
+        [
+            ("Hipertenzija", "Granična, pod kontrolom dijetom.", "2024-09-01", "active"),
+            ("Deficit gvožđa", "Blaga sideropenija.", "2025-02-14", "active"),
+        ],
+    )
+    q_execmany(
+        """INSERT INTO lab_results (parameter_name,value,unit,reference_range,test_date)
+           VALUES (?,?,?,?,?)""",
+        [
+            ("Glukoza", 5.1, "mmol/L", "3.9-5.5", "2025-05-20"),
+            ("Natrijum", 138, "mmol/L", "136-145", "2025-05-20"),
+            ("Gvožđe", 9.2, "µmol/L", "11-28", "2025-05-20"),
+            ("Holesterol", 5.6, "mmol/L", "<5.2", "2025-05-20"),
+        ],
+    )
 
 
 def latest_vitals():
@@ -1049,14 +1095,41 @@ def render_dashboard():
 # =========================================================================== #
 #  VIEW: SMART CAMERA
 # =========================================================================== #
+def _handle_scan_result(res: dict) -> bool:
+    """Rutira jedan AI nalaz u pravu tabelu i prikazuje ga. Vraća True ako prepoznato."""
+    dt = res.get("doc_type")
+    conf = res.get("confidence", "")
+    if dt == "vitals_device" and res.get("vitals"):
+        st.success(f"🩺 Prepoznato: merenje sa uređaja · pouzdanost {conf}.")
+        _store_and_show_vitals(res["vitals"])
+    elif dt == "food_product" and res.get("food"):
+        st.success(f"🍎 Prepoznato: prehrambeni proizvod · pouzdanost {conf}.")
+        _show_food_result(res["food"])
+    elif dt == "medical_document" and res.get("document"):
+        st.success(f"📄 Prepoznato: medicinski dokument · pouzdanost {conf}.")
+        _store_and_show_doc(res["document"])
+    else:
+        st.warning("Nisam uspeo pouzdano da prepoznam sliku. "
+                   f"{res.get('notes') or ''} Probaj jasniju/bližu fotografiju.")
+        return False
+    return True
+
+
 def render_camera():
     st.markdown("## 📷 Smart Camera")
-    st.caption("Slikaj bilo šta — merač pritiska, deklaraciju hrane ili medicinski "
-               "nalaz. Mozak aplikacije sam prepozna tip i smesti podatak na pravo mesto.")
+    st.caption("Slikaj ili otpremi bilo šta — merač pritiska, deklaraciju hrane ili "
+               "medicinski nalaz. Mozak sam prepozna tip i smesti na pravo mesto. "
+               "Iz galerije možeš odabrati i **više slika odjednom** (5+).")
 
-    src = st.radio("Izvor slike", ["📸 Kamera", "📁 Otpremi sliku"], horizontal=True)
-    img_file = (st.camera_input("Slikaj") if src.startswith("📸")
-                else st.file_uploader("Otpremi", type=["png", "jpg", "jpeg", "webp"]))
+    src = st.radio("Izvor slike",
+                   ["📁 Otpremi iz galerije (više slika)", "📸 Kamera"], horizontal=True)
+    if src.startswith("📸"):
+        one = st.camera_input("Slikaj")
+        images = [one] if one else []
+    else:
+        images = st.file_uploader(
+            "Otpremi slike — možeš izabrati 5 i više odjednom",
+            type=["png", "jpg", "jpeg", "webp"], accept_multiple_files=True) or []
 
     if not google_ready:
         st.warning("Unesi GOOGLE_VISION_API_KEY u ⚙️ (bočna traka) — Google čita tekst sa slike.")
@@ -1064,42 +1137,38 @@ def render_camera():
     if not api_ready:
         st.warning("Unesi ANTHROPIC_API_KEY u ⚙️ (bočna traka) — Claude radi procenu.")
         return
-    if img_file is None:
+    if not images:
+        st.caption("Izaberi jednu ili više slika iz galerije (ili prebaci na Kamera).")
         return
 
-    if st.button("🔍 Analiziraj", type="primary", use_container_width=True):
-        b64 = image_to_b64(img_file)
-        if not b64:
-            st.error("Ne mogu da pročitam sliku.")
-            return
-        try:
-            with st.spinner("Google Vision čita tekst…"):
-                ocr_text = google_ocr(b64, google_key)
-            if not ocr_text:
-                st.warning("Google Vision nije pronašao tekst na slici. "
-                           "Probaj jasniju/bližu fotografiju.")
-                return
-            with st.expander("📝 Pročitan tekst (Google OCR)"):
-                st.text(ocr_text)
-            with st.spinner("Mozak prepoznaje i obrađuje…"):
-                res = smart_analyze(ocr_text, model_id, api_key)
-
-            dt = res.get("doc_type")
-            conf = res.get("confidence", "")
-            if dt == "vitals_device" and res.get("vitals"):
-                st.success(f"🩺 Prepoznato: merenje sa uređaja · pouzdanost {conf}.")
-                _store_and_show_vitals(res["vitals"])
-            elif dt == "food_product" and res.get("food"):
-                st.success(f"🍎 Prepoznato: prehrambeni proizvod · pouzdanost {conf}.")
-                _show_food_result(res["food"])
-            elif dt == "medical_document" and res.get("document"):
-                st.success(f"📄 Prepoznato: medicinski dokument · pouzdanost {conf}.")
-                _store_and_show_doc(res["document"])
-            else:
-                st.warning("Nisam uspeo pouzdano da prepoznam sliku. "
-                           f"{res.get('notes') or ''} Probaj jasniju/bližu fotografiju.")
-        except Exception as e:  # noqa: BLE001
-            st.error(f"Greška u analizi: {e}")
+    st.caption(f"Spremno za analizu: **{len(images)}** "
+               f"{'slika' if len(images) == 1 else 'slika'}.")
+    if st.button(f"🔍 Analiziraj ({len(images)})", type="primary", use_container_width=True):
+        ok = 0
+        for i, img_file in enumerate(images, 1):
+            if len(images) > 1:
+                st.markdown(f"#### 🖼️ Slika {i} / {len(images)}")
+            try:
+                b64 = image_to_b64(img_file)
+                if not b64:
+                    st.error("Ne mogu da pročitam sliku.")
+                    continue
+                with st.spinner(f"Google Vision čita tekst… (slika {i})"):
+                    ocr_text = google_ocr(b64, google_key)
+                if not ocr_text:
+                    st.warning("Nema čitljivog teksta na ovoj slici — preskačem.")
+                    continue
+                with st.expander("📝 Pročitan tekst (Google OCR)"):
+                    st.text(ocr_text)
+                with st.spinner(f"Mozak prepoznaje i obrađuje… (slika {i})"):
+                    res = smart_analyze(ocr_text, model_id, api_key)
+                if _handle_scan_result(res):
+                    ok += 1
+            except Exception as e:  # noqa: BLE001
+                st.error(f"Greška na slici {i}: {e}")
+            if len(images) > 1:
+                st.divider()
+        st.success(f"✅ Obrađeno {ok} / {len(images)} slika i sačuvano u bazu.")
 
 
 def _store_and_show_vitals(vit: dict):
@@ -1110,13 +1179,12 @@ def _store_and_show_vitals(vit: dict):
     deep, rem, restless = (_iv(vit, "deep_sleep_duration"),
                            _iv(vit, "rem_sleep_duration"), _iv(vit, "restless_count"))
     n = lambda x: x if x else None  # noqa: E731
-    with get_db() as db:
-        db.execute(
-            """INSERT INTO user_vitals (heart_rate,sleep_duration,deep_sleep_duration,
-               rem_sleep_duration,restless_count,stress_level,blood_pressure_sys,
-               blood_pressure_dia,timestamp) VALUES (?,?,?,?,?,?,?,?,?)""",
-            (n(hr), n(sleep), n(deep), n(rem), n(restless), n(stress), n(sys), n(dia),
-             rdt.isoformat()))
+    q_exec(
+        """INSERT INTO user_vitals (heart_rate,sleep_duration,deep_sleep_duration,
+           rem_sleep_duration,restless_count,stress_level,blood_pressure_sys,
+           blood_pressure_dia,timestamp) VALUES (?,?,?,?,?,?,?,?,?)""",
+        (n(hr), n(sleep), n(deep), n(rem), n(restless), n(stress), n(sys), n(dia),
+         rdt.isoformat()))
     parts = []
     if sys and dia:
         parts.append(f"Pritisak <b>{sys}/{dia}</b> mmHg")
@@ -1146,18 +1214,17 @@ def _store_and_show_doc(doc: dict):
     labs = doc.get("lab_results") or []
     saved = 0
     if labs:
-        with get_db() as db:
-            for l in labs:
-                try:
-                    db.execute(
-                        """INSERT INTO lab_results (parameter_name,value,unit,
-                           reference_range,test_date) VALUES (?,?,?,?,?)""",
-                        (l.get("parameter_name", "?"), float(l.get("value", 0)),
-                         l.get("unit", ""), l.get("reference_range", ""),
-                         date.today().isoformat()))
-                    saved += 1
-                except (ValueError, TypeError):
-                    continue
+        for l in labs:
+            try:
+                q_exec(
+                    """INSERT INTO lab_results (parameter_name,value,unit,
+                       reference_range,test_date) VALUES (?,?,?,?,?)""",
+                    (l.get("parameter_name", "?"), float(l.get("value", 0)),
+                     l.get("unit", ""), l.get("reference_range", ""),
+                     date.today().isoformat()))
+                saved += 1
+            except (ValueError, TypeError):
+                continue
         st.markdown("##### 🧪 Sačuvani laboratorijski parametri")
         st.dataframe(labs, use_container_width=True)
     dxs = doc.get("diagnoses") or []
@@ -1185,46 +1252,13 @@ def _show_food_result(res: dict):
         st.write(res.get("ingredients_text", "—"))
 
     # Upis u dnevnik skeniranja
-    with get_db() as db:
-        db.execute(
-            """INSERT INTO scanned_products_log (product_name,ingredients_text,
-               ai_verdict,analysis_reason,timestamp) VALUES (?,?,?,?,?)""",
-            (res.get("product_name", "Proizvod"), res.get("ingredients_text"),
-             status, res.get("verdict_message"), datetime.now().isoformat()),
-        )
+    q_exec(
+        """INSERT INTO scanned_products_log (product_name,ingredients_text,
+           ai_verdict,analysis_reason,timestamp) VALUES (?,?,?,?,?)""",
+        (res.get("product_name", "Proizvod"), res.get("ingredients_text"),
+         status, res.get("verdict_message"), datetime.now().isoformat()),
+    )
     st.success("Rezultat sačuvan u istoriju skeniranja.")
-
-
-def _show_doc_result(res: dict):
-    st.markdown(f"#### 📄 {res.get('document_type','Dokument').title()}")
-    st.caption(res.get("summary", ""))
-    with st.expander("Pročitani tekst", expanded=True):
-        st.write(res.get("full_text", "—"))
-
-    labs = res.get("lab_results", []) or []
-    if labs:
-        st.markdown("##### 🧪 Prepoznati laboratorijski parametri")
-        st.dataframe(labs, use_container_width=True)
-        if st.button("💾 Sačuvaj nalaze u bazu"):
-            with get_db() as db:
-                for l in labs:
-                    try:
-                        db.execute(
-                            """INSERT INTO lab_results (parameter_name,value,unit,
-                               reference_range,test_date) VALUES (?,?,?,?,?)""",
-                            (l.get("parameter_name", "?"), float(l.get("value", 0)),
-                             l.get("unit", ""), l.get("reference_range", ""),
-                             date.today().isoformat()),
-                        )
-                    except (ValueError, TypeError):
-                        continue
-            st.success("Laboratorijski nalazi sačuvani.")
-
-    dxs = res.get("diagnoses", []) or []
-    if dxs:
-        st.markdown("##### 🩺 Prepoznate dijagnoze")
-        for d in dxs:
-            st.markdown(f"- {d}")
 
 
 def _iv(res: dict, key: str) -> int:
@@ -1257,51 +1291,6 @@ def _parse_reading_dt(res: dict) -> datetime:
     return datetime.combine(d, t)
 
 
-def _show_vitals_result(res: dict):
-    """Prikaz pročitanih vrednosti sa uređaja + potvrda/ispravka pre čuvanja."""
-    name = res.get("device_name")
-    dev = res.get("device_type", "—") + (f" · {name}" if name else "")
-    st.markdown(
-        f"<div class='mt-card'><b>📟 Prepoznat uređaj:</b> {dev}<br>"
-        f"<span class='mt-muted'>{res.get('notes','')}</span></div>",
-        unsafe_allow_html=True)
-    st.caption("Proveri i po potrebi ispravi vrednosti i vreme merenja pre čuvanja "
-               "(OCR ekrana ume da pogreši).")
-
-    rdt = _parse_reading_dt(res)
-    with st.form("vitals_scan_form"):
-        cd, ct = st.columns(2)
-        meas_date = cd.date_input("Datum merenja", rdt.date())
-        meas_time = ct.time_input("Vreme merenja", rdt.time())
-        c1, c2, c3 = st.columns(3)
-        sys = c1.number_input("Pritisak — SYS", 0, 300, _iv(res, "blood_pressure_sys"))
-        dia = c2.number_input("Pritisak — DIA", 0, 200, _iv(res, "blood_pressure_dia"))
-        hr = c3.number_input("Puls (bpm)", 0, 250, _iv(res, "heart_rate"))
-        c4, c5, c6 = st.columns(3)
-        stress = c4.number_input("Stres (0-100)", 0, 100, _iv(res, "stress_level"))
-        sleep = c5.number_input("San (min)", 0, 1000, _iv(res, "sleep_duration"))
-        deep = c6.number_input("Duboki san (min)", 0, 600, _iv(res, "deep_sleep_duration"))
-        c7, c8 = st.columns(2)
-        rem = c7.number_input("REM (min)", 0, 600, _iv(res, "rem_sleep_duration"))
-        restless = c8.number_input("Nemiran san (x)", 0, 50, _iv(res, "restless_count"))
-
-        if st.form_submit_button("💾 Sačuvaj u vitalne znake", type="primary"):
-            # 0 tretiramo kao „nije izmereno" → upiši NULL (da ne kvarimo Dashboard)
-            n = lambda x: x if x else None  # noqa: E731
-            ts = datetime.combine(meas_date, meas_time).isoformat()
-            with get_db() as db:
-                db.execute(
-                    """INSERT INTO user_vitals (heart_rate,sleep_duration,
-                       deep_sleep_duration,rem_sleep_duration,restless_count,
-                       stress_level,blood_pressure_sys,blood_pressure_dia,timestamp)
-                       VALUES (?,?,?,?,?,?,?,?,?)""",
-                    (n(hr), n(sleep), n(deep), n(rem), n(restless), n(stress),
-                     n(sys), n(dia), ts))
-            st.session_state.pop("vitals_parsed", None)
-            st.success("Vitalni znaci sačuvani — Dashboard je ažuriran.")
-            st.balloons()
-
-
 # =========================================================================== #
 #  VIEW: UNOS PODATAKA
 # =========================================================================== #
@@ -1323,14 +1312,13 @@ def render_entry():
             sys = c7.number_input("Pritisak — sistolni", 0, 300, 120)
             dia = c8.number_input("Pritisak — dijastolni", 0, 200, 80)
             if st.form_submit_button("Sačuvaj vitalne znake", type="primary"):
-                with get_db() as db:
-                    db.execute(
-                        """INSERT INTO user_vitals (heart_rate,sleep_duration,
-                           deep_sleep_duration,rem_sleep_duration,restless_count,
-                           stress_level,blood_pressure_sys,blood_pressure_dia,timestamp)
-                           VALUES (?,?,?,?,?,?,?,?,?)""",
-                        (hr, sleep, deep, rem, restless, stress, sys, dia,
-                         datetime.now().isoformat()))
+                q_exec(
+                    """INSERT INTO user_vitals (heart_rate,sleep_duration,
+                       deep_sleep_duration,rem_sleep_duration,restless_count,
+                       stress_level,blood_pressure_sys,blood_pressure_dia,timestamp)
+                       VALUES (?,?,?,?,?,?,?,?,?)""",
+                    (hr, sleep, deep, rem, restless, stress, sys, dia,
+                     datetime.now().isoformat()))
                 st.success("Vitalni znaci sačuvani.")
 
     with t2:
@@ -1342,12 +1330,11 @@ def render_entry():
             status = c2.selectbox("Status", ["active", "monitoring", "resolved"])
             if st.form_submit_button("Sačuvaj dijagnozu", type="primary"):
                 if name.strip():
-                    with get_db() as db:
-                        db.execute(
-                            """INSERT INTO medical_history (diagnosis_name,
-                               doctor_report_text,date_diagnosed,status)
-                               VALUES (?,?,?,?)""",
-                            (name.strip(), report.strip(), ddate.isoformat(), status))
+                    q_exec(
+                        """INSERT INTO medical_history (diagnosis_name,
+                           doctor_report_text,date_diagnosed,status)
+                           VALUES (?,?,?,?)""",
+                        (name.strip(), report.strip(), ddate.isoformat(), status))
                     st.success("Dijagnoza sačuvana.")
                 else:
                     st.warning("Unesi naziv dijagnoze.")
@@ -1363,11 +1350,10 @@ def render_entry():
             tdate = c5.date_input("Datum nalaza", date.today())
             if st.form_submit_button("Sačuvaj nalaz", type="primary"):
                 if pname.strip():
-                    with get_db() as db:
-                        db.execute(
-                            """INSERT INTO lab_results (parameter_name,value,unit,
-                               reference_range,test_date) VALUES (?,?,?,?,?)""",
-                            (pname.strip(), val, unit, ref, tdate.isoformat()))
+                    q_exec(
+                        """INSERT INTO lab_results (parameter_name,value,unit,
+                           reference_range,test_date) VALUES (?,?,?,?,?)""",
+                        (pname.strip(), val, unit, ref, tdate.isoformat()))
                     st.success("Laboratorijski nalaz sačuvan.")
                 else:
                     st.warning("Unesi naziv parametra.")
