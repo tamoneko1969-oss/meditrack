@@ -1,0 +1,14 @@
+# Futuristička neon / glassmorphism estetika (tirkiz + magenta na tamnom)
+[theme]
+base = "dark"
+primaryColor = "#22d3ee"             # neon tirkiz (akcent)
+backgroundColor = "#06141f"          # duboka tamna podloga (gradijent ide preko CSS-a)
+secondaryBackgroundColor = "#0c1c2e" # paneli / kartice
+textColor = "#eaf2ff"
+font = "sans serif"
+
+[server]
+maxUploadSize = 50
+
+[browser]
+gatherUsageStats = false

@@ -1,0 +1,13 @@
+# Tajne — NIKAD na GitHub (idu u Streamlit Cloud → Secrets)
+.anthropic_key
+.google_key
+.streamlit/secrets.toml
+
+# Lokalna baza sa zdravstvenim podacima — ostaje privatno
+*.db
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
