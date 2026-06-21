@@ -143,10 +143,11 @@ def inject_css(mode: str) -> None:
 
         .mt-camera {{
             background:linear-gradient(135deg,{p['primary']},{p['amber']});
-            border-radius:22px; padding:24px; color:#04222a;
-            box-shadow:0 16px 40px rgba(34,211,238,.35);
+            border-radius:16px; padding:12px 18px; color:#04222a;
+            box-shadow:0 10px 26px rgba(34,211,238,.30);
         }}
-        .mt-camera h2 {{ color:#04222a!important; margin:0; }}
+        .mt-camera h2 {{ color:#04222a!important; margin:0; font-size:1.15rem; }}
+        .mt-camera p {{ margin:1px 0 0; font-size:.78rem; line-height:1.25; }}
         .mt-pill {{
             display:inline-flex; align-items:center; gap:8px;
             padding:6px 14px; border-radius:16px; font-weight:800; font-size:.85rem;
@@ -1061,8 +1062,7 @@ def render_dashboard():
     # --- Smart Camera (jedno dugme — mozak sam prepoznaje tip) ---
     st.markdown(
         "<div class='mt-camera'><h2>📷 Smart Camera</h2>"
-        "<p style='opacity:.92;margin:.4rem 0 0'>Slikaj bilo šta — merač pritiska, "
-        "deklaraciju hrane ili medicinski nalaz. AI sam prepozna i smesti na pravo mesto.</p></div>",
+        "<p style='opacity:.9'>Slikaj merač, hranu ili nalaz — AI prepozna i sačuva.</p></div>",
         unsafe_allow_html=True,
     )
     if st.button("📷 Otvori Smart Camera", use_container_width=True, type="primary"):
