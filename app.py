@@ -1154,7 +1154,7 @@ def _handle_scan_result(res: dict) -> bool:
     conf = res.get("confidence", "")
     if dt == "vitals_device" and res.get("vitals"):
         st.success(f"🩺 Prepoznato: merenje sa uređaja · pouzdanost {conf}.")
-        _store_and_show_vitals(res["vitals"])
+        _transfer_vitals_to_entry(res["vitals"])
     elif dt == "food_product" and res.get("food"):
         st.success(f"🍎 Prepoznato: prehrambeni proizvod · pouzdanost {conf}.")
         _show_food_result(res["food"])
@@ -1221,40 +1221,45 @@ def render_camera():
                 st.error(f"Greška na slici {i}: {e}")
             if len(images) > 1:
                 st.divider()
-        st.success(f"✅ Obrađeno {ok} / {len(images)} slika i sačuvano u bazu.")
+        st.success(f"✅ Obrađeno {ok} / {len(images)} slika.")
+        if st.session_state.pop("go_to_entry", False):
+            st.session_state["view"] = "Unos podataka"
+            st.rerun()
 
 
-def _store_and_show_vitals(vit: dict):
-    """Auto-čuvanje merenja u user_vitals + prikaz sažetka."""
+def _transfer_vitals_to_entry(vit: dict):
+    """Prebacuje pročitana merenja (pritisak/puls...) u formu „Unos podataka"
+    na proveru i čuvanje — umesto tihog upisa u bazu."""
     rdt = _parse_reading_dt(vit)
-    hr, sys, dia = _iv(vit, "heart_rate"), _iv(vit, "blood_pressure_sys"), _iv(vit, "blood_pressure_dia")
-    stress, sleep = _iv(vit, "stress_level"), _iv(vit, "sleep_duration")
-    deep, rem, restless = (_iv(vit, "deep_sleep_duration"),
-                           _iv(vit, "rem_sleep_duration"), _iv(vit, "restless_count"))
-    n = lambda x: x if x else None  # noqa: E731
-    q_exec(
-        """INSERT INTO user_vitals (heart_rate,sleep_duration,deep_sleep_duration,
-           rem_sleep_duration,restless_count,stress_level,blood_pressure_sys,
-           blood_pressure_dia,timestamp) VALUES (?,?,?,?,?,?,?,?,?)""",
-        (n(hr), n(sleep), n(deep), n(rem), n(restless), n(stress), n(sys), n(dia),
-         rdt.isoformat()))
-    parts = []
-    if sys and dia:
-        parts.append(f"Pritisak <b>{sys}/{dia}</b> mmHg")
-    if hr:
-        parts.append(f"Puls <b>{hr}</b> bpm")
-    if stress:
-        parts.append(f"Stres <b>{stress}</b>/100")
-    if sleep:
-        parts.append(f"San <b>{sleep//60}h {sleep%60:02d}m</b>")
+    vals = {
+        "ev_sys": _iv(vit, "blood_pressure_sys"),
+        "ev_dia": _iv(vit, "blood_pressure_dia"),
+        "ev_hr": _iv(vit, "heart_rate"),
+        "ev_stress": _iv(vit, "stress_level"),
+        "ev_sleep": _iv(vit, "sleep_duration"),
+        "ev_deep": _iv(vit, "deep_sleep_duration"),
+        "ev_rem": _iv(vit, "rem_sleep_duration"),
+        "ev_restless": _iv(vit, "restless_count"),
+    }
+    for k, val in vals.items():
+        st.session_state[k] = val
+    st.session_state["ev_date"] = rdt.date()
+    st.session_state["ev_time"] = rdt.time().replace(second=0, microsecond=0)
+    st.session_state["prefill_vitals_active"] = True
+    st.session_state["go_to_entry"] = True
+
     dev = vit.get("device_name") or vit.get("device_type") or "uređaj"
+    parts = []
+    if vals["ev_sys"] and vals["ev_dia"]:
+        parts.append(f"Pritisak <b>{vals['ev_sys']}/{vals['ev_dia']}</b> mmHg")
+    if vals["ev_hr"]:
+        parts.append(f"Puls <b>{vals['ev_hr']}</b> bpm")
     st.markdown(
         f"<div class='mt-card'><b>📟 {dev}</b> · "
         f"<span class='mt-muted'>{rdt:%Y-%m-%d %H:%M}</span><br>"
         f"{' · '.join(parts) or 'nije pročitano nijedno merenje'}</div>",
         unsafe_allow_html=True)
-    st.success("Sačuvano u vitalne znake — Dashboard je ažuriran.")
-    st.caption("Ako je neka vrednost pogrešno pročitana, ispravi je na „✍️ Unos podataka“.")
+    st.info("➡️ Vrednosti su prebačene u „Unos podataka“ — proveri i klikni Sačuvaj.")
 
 
 def _store_and_show_doc(doc: dict):
@@ -1390,32 +1395,56 @@ def render_profile():
 # =========================================================================== #
 #  VIEW: UNOS PODATAKA
 # =========================================================================== #
+_EV_DEFAULTS = {"ev_hr": 60, "ev_stress": 30, "ev_restless": 0, "ev_sleep": 420,
+                "ev_deep": 90, "ev_rem": 110, "ev_sys": 120, "ev_dia": 80}
+
+
 def render_entry():
+    # Posle čuvanja: očisti polja i prefill oznaku (pre kreiranja widgeta)
+    if st.session_state.pop("_entry_saved", False):
+        for k in list(_EV_DEFAULTS) + ["ev_date", "ev_time", "prefill_vitals_active"]:
+            st.session_state.pop(k, None)
+    # Pre-seed default vrednosti polja (prefill iz kamere ih je već možda postavio)
+    for k, dv in _EV_DEFAULTS.items():
+        st.session_state.setdefault(k, dv)
+    st.session_state.setdefault("ev_date", date.today())
+    st.session_state.setdefault("ev_time",
+                                datetime.now().time().replace(second=0, microsecond=0))
+
     st.markdown("## ✍️ Unos podataka")
     t1, t2, t3 = st.tabs(["🫀 Vitalni znaci", "🩺 Dijagnoza", "🧪 Lab nalaz"])
 
     with t1:
+        if st.session_state.get("prefill_vitals_active"):
+            st.info("📷 Vrednosti su prebačene sa slike merača — proveri i klikni Sačuvaj.")
         with st.form("vitals"):
-            c1, c2, c3 = st.columns(3)
-            hr = c1.number_input("Puls (bpm)", 0, 250, 60)
-            stress = c2.number_input("Stres (0-100)", 0, 100, 30)
-            restless = c3.number_input("Nemiran san (x)", 0, 50, 0)
-            c4, c5, c6 = st.columns(3)
-            sleep = c4.number_input("San (min)", 0, 1000, 420)
-            deep = c5.number_input("Duboki san (min)", 0, 600, 90)
-            rem = c6.number_input("REM (min)", 0, 600, 110)
-            c7, c8 = st.columns(2)
-            sys = c7.number_input("Pritisak — sistolni", 0, 300, 120)
-            dia = c8.number_input("Pritisak — dijastolni", 0, 200, 80)
-            if st.form_submit_button("Sačuvaj vitalne znake", type="primary"):
+            cd, ct = st.columns(2)
+            mdate = cd.date_input("Datum merenja", key="ev_date")
+            mtime = ct.time_input("Vreme merenja", key="ev_time")
+            c7, c8, c3 = st.columns(3)
+            sys = c7.number_input("Pritisak — sistolni (gornji)", 0, 300, key="ev_sys")
+            dia = c8.number_input("Pritisak — dijastolni (donji)", 0, 200, key="ev_dia")
+            hr = c3.number_input("Puls (bpm)", 0, 250, key="ev_hr")
+            c2, c4, c5 = st.columns(3)
+            stress = c2.number_input("Stres (0-100)", 0, 100, key="ev_stress")
+            sleep = c4.number_input("San (min)", 0, 1000, key="ev_sleep")
+            deep = c5.number_input("Duboki san (min)", 0, 600, key="ev_deep")
+            c6, c9 = st.columns(2)
+            rem = c6.number_input("REM (min)", 0, 600, key="ev_rem")
+            restless = c9.number_input("Nemiran san (x)", 0, 50, key="ev_restless")
+            if st.form_submit_button("💾 Sačuvaj vitalne znake", type="primary"):
+                n = lambda x: x if x else None  # 0 = nije izmereno → NULL  # noqa: E731
+                ts = datetime.combine(mdate, mtime).isoformat()
                 q_exec(
                     """INSERT INTO user_vitals (heart_rate,sleep_duration,
                        deep_sleep_duration,rem_sleep_duration,restless_count,
                        stress_level,blood_pressure_sys,blood_pressure_dia,timestamp)
                        VALUES (?,?,?,?,?,?,?,?,?)""",
-                    (hr, sleep, deep, rem, restless, stress, sys, dia,
-                     datetime.now().isoformat()))
-                st.success("Vitalni znaci sačuvani.")
+                    (n(hr), n(sleep), n(deep), n(rem), n(restless), n(stress),
+                     n(sys), n(dia), ts))
+                st.session_state["_entry_saved"] = True
+                st.success("Vitalni znaci sačuvani — Dashboard ažuriran.")
+                st.rerun()
 
     with t2:
         with st.form("dx"):
