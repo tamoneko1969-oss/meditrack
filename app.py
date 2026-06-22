@@ -206,6 +206,20 @@ def inject_css(mode: str) -> None:
         .vcard .sub {{ color:{p['muted']}; font-size:.74rem; margin-top:4px; }}
         .vcard .viz {{ flex:0 0 auto; margin-left:14px; display:flex; align-items:center; }}
         .led-dot {{ width:18px; height:18px; border-radius:50%; }}
+
+        /* Navigacija: 3×2 mreža koja OSTAJE mreža i na telefonu (ne slaže se vertikalno) */
+        .st-key-mtnav div[data-testid="stHorizontalBlock"] {{
+            flex-direction:row !important; flex-wrap:nowrap !important; gap:8px !important;
+            margin-bottom:8px;
+        }}
+        .st-key-mtnav div[data-testid="stColumn"],
+        .st-key-mtnav div[data-testid="column"] {{
+            min-width:0 !important; width:33.33% !important; flex:1 1 0 !important;
+        }}
+        .st-key-mtnav .stButton>button {{
+            padding:10px 4px !important; font-size:.82rem !important;
+            line-height:1.1 !important; white-space:nowrap;
+        }}
         </style>
         """,
         unsafe_allow_html=True,
@@ -957,16 +971,18 @@ api_ready = bool(api_key)
 # --------------------------------------------------------------------------- #
 #  Navigacija
 # --------------------------------------------------------------------------- #
-nav = st.columns(6)
 labels = ["🏠 Dashboard", "📷 Smart Camera", "📈 Trendovi", "👤 Profil",
           "✍️ Unos podataka", "🗂️ Istorija"]
 views = ["Dashboard", "Smart Camera", "Trendovi", "Profil", "Unos podataka", "Istorija"]
-for col, lab, vw in zip(nav, labels, views):
-    with col:
-        kind = "primary" if st.session_state["view"] == vw else "secondary"
-        if st.button(lab, use_container_width=True, type=kind):
-            st.session_state["view"] = vw
-            st.rerun()
+# Navigacija kao 3×2 mreža — ostaje mreža i na telefonu (CSS .st-key-mtnav)
+with st.container(key="mtnav"):
+    rows = [st.columns(3), st.columns(3)]
+    for idx, (lab, vw) in enumerate(zip(labels, views)):
+        with rows[idx // 3][idx % 3]:
+            kind = "primary" if st.session_state["view"] == vw else "secondary"
+            if st.button(lab, use_container_width=True, type=kind, key=f"nav_{vw}"):
+                st.session_state["view"] = vw
+                st.rerun()
 
 st.write("")
 view = st.session_state["view"]
