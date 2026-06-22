@@ -819,25 +819,42 @@ VRATI ISKLJUČIVO validan JSON (bez markdown ograda):
   "notes": "<poruka korisniku na srpskom>"
 }
 
-PRAVILA za vitals: IGNORIŠI M1/M2/mmHg/1/min/bpm; vreme (14:14) ide u reading_time, \
-NIJE merenje; sate sna pretvori u minute. SYS > DIA.
+PRAVILA za vitals (KRITIČNO za tačnost sa LCD/sedam-segmentnih ekrana):
+- Brojevi su poređani VERTIKALNO odozgo nadole: 1) SYS (gornji/sistolni, NAJVEĆI broj),
+  2) DIA (donji/dijastolni, srednji broj), 3) PULS (najdonji broj, uz „PULSE/1/min").
+- Čitaj cifre PAŽLJIVO sa SLIKE (npr. „140" se na sedam-segmentu lako pomeša). SYS je
+  skoro uvek 100-180, DIA 60-110, PULS 45-100 — koristi to za proveru logike.
+- IGNORIŠI: M1/M2 (memorija), mmHg, 1/min, bpm, brend. Vreme (npr. 17:24) ide u
+  reading_time i NIJE merenje. Sate sna pretvori u minute.
 PRAVILA za food: NE generička recenzija — ukrsti sa korisnikovim pritiskom, dijagnozama \
 i lab nalazima (visok natrijum + povišen pritisak → RED/YELLOW, itd.).
 Sav opisni tekst na srpskom."""
 
 
-def smart_analyze(ocr_text: str, model_id: str, api_key: str) -> dict:
-    """Jedan poziv: klasifikuje sliku i izvlači podatke odgovarajućeg tipa."""
+def _claude_image_block(image_b64: str) -> dict:
+    return {"type": "image",
+            "source": {"type": "base64", "media_type": "image/jpeg", "data": image_b64}}
+
+
+def smart_analyze(image_b64: str, ocr_text: str, model_id: str, api_key: str) -> dict:
+    """Jedan poziv: Claude ČITA SAMU SLIKU (pouzdano za LCD/cifre), klasifikuje i
+    izvlači podatke. Google OCR tekst je samo pomoćni nagoveštaj."""
     client = _make_client(api_key)
     ctx = build_health_context()
-    user_msg = (
-        f"ZDRAVSTVENI PROFIL KORISNIKA:\n{ctx}\n\n"
-        f"PROČITAN TEKST SA SLIKE (OCR):\n\"\"\"\n{ocr_text or '(prazno)'}\n\"\"\"\n\n"
-        f"Klasifikuj i izvuci podatke. Vrati ISKLJUČIVO JSON prema strukturi."
-    )
+    content = [
+        {"type": "text", "text": f"ZDRAVSTVENI PROFIL KORISNIKA:\n{ctx}"},
+        {"type": "text", "text": "FOTOGRAFIJA — čitaj PRVENSTVENO direktno sa slike "
+         "(naročito brojeve na ekranu/LCD-u, deklaracije i nalaze):"},
+        _claude_image_block(image_b64),
+    ]
+    if ocr_text:
+        content.append({"type": "text", "text": "Pomoćni OCR tekst (može imati grešaka — "
+                        f"SLIKA ima prednost):\n\"\"\"\n{ocr_text}\n\"\"\""})
+    content.append({"type": "text", "text":
+                    "Klasifikuj i izvuci podatke. Vrati ISKLJUČIVO JSON prema strukturi."})
     with client.messages.stream(
         model=model_id, max_tokens=2200, system=SMART_ROUTER_SYSTEM,
-        messages=[{"role": "user", "content": user_msg}],
+        messages=[{"role": "user", "content": content}],
     ) as stream:
         resp = stream.get_final_message()
     raw = "".join(b.text for b in resp.content if b.type == "text")
@@ -1184,18 +1201,15 @@ def render_camera():
             "Otpremi slike — možeš izabrati 5 i više odjednom",
             type=["png", "jpg", "jpeg", "webp"], accept_multiple_files=True) or []
 
-    if not google_ready:
-        st.warning("Unesi GOOGLE_VISION_API_KEY u ⚙️ (bočna traka) — Google čita tekst sa slike.")
-        return
     if not api_ready:
-        st.warning("Unesi ANTHROPIC_API_KEY u ⚙️ (bočna traka) — Claude radi procenu.")
+        st.warning("Unesi ANTHROPIC_API_KEY u ⚙️ (bočna traka) — Claude čita sliku i radi procenu.")
         return
     if not images:
         st.caption("Izaberi jednu ili više slika iz galerije (ili prebaci na Kamera).")
         return
 
-    st.caption(f"Spremno za analizu: **{len(images)}** "
-               f"{'slika' if len(images) == 1 else 'slika'}.")
+    st.caption(f"Spremno za analizu: **{len(images)}** slika. "
+               f"{'Google Vision pomaže pri čitanju teksta.' if google_ready else ''}")
     if st.button(f"🔍 Analiziraj ({len(images)})", type="primary", use_container_width=True):
         ok = 0
         for i, img_file in enumerate(images, 1):
@@ -1206,15 +1220,18 @@ def render_camera():
                 if not b64:
                     st.error("Ne mogu da pročitam sliku.")
                     continue
-                with st.spinner(f"Google Vision čita tekst… (slika {i})"):
-                    ocr_text = google_ocr(b64, google_key)
-                if not ocr_text:
-                    st.warning("Nema čitljivog teksta na ovoj slici — preskačem.")
-                    continue
-                with st.expander("📝 Pročitan tekst (Google OCR)"):
-                    st.text(ocr_text)
-                with st.spinner(f"Mozak prepoznaje i obrađuje… (slika {i})"):
-                    res = smart_analyze(ocr_text, model_id, api_key)
+                # Google OCR je samo pomoćni nagoveštaj — Claude čita samu sliku
+                ocr_text = ""
+                if google_ready:
+                    try:
+                        ocr_text = google_ocr(b64, google_key)
+                    except Exception:  # noqa: BLE001
+                        ocr_text = ""
+                    if ocr_text:
+                        with st.expander("📝 Pomoćni OCR tekst (Google Vision)"):
+                            st.text(ocr_text)
+                with st.spinner(f"Mozak čita sliku i obrađuje… (slika {i})"):
+                    res = smart_analyze(b64, ocr_text, model_id, api_key)
                 if _handle_scan_result(res):
                     ok += 1
             except Exception as e:  # noqa: BLE001
