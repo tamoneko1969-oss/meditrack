@@ -1092,18 +1092,6 @@ def render_dashboard():
 
     st.write("")
 
-    # --- Smart Camera (jedno dugme — mozak sam prepoznaje tip) ---
-    st.markdown(
-        "<div class='mt-camera'><h2>📷 Smart Camera</h2>"
-        "<p style='opacity:.9'>Slikaj merač, hranu ili nalaz — AI prepozna i sačuva.</p></div>",
-        unsafe_allow_html=True,
-    )
-    if st.button("📷 Otvori Smart Camera", use_container_width=True, type="primary"):
-        st.session_state["view"] = "Smart Camera"
-        st.rerun()
-
-    st.write("")
-
     # --- Detaljni vitalni znaci (san + dodatne metrike) ---
     st.markdown("### 🌙 San i detaljne metrike")
     if v:
