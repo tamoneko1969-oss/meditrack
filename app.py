@@ -113,7 +113,7 @@ def inject_css(mode: str) -> None:
         .stApp, .stApp p, .stApp label, .stApp span, .stMarkdown {{ color:{p['text']}; }}
         h1,h2,h3,h4,h5 {{ color:{p['text']};
             font-family:'Segoe UI',system-ui,sans-serif; font-weight:800; letter-spacing:-.3px; }}
-        .block-container {{ padding-top:1.4rem; max-width:1180px; }}
+        .block-container {{ padding-top:3.4rem; max-width:1180px; }}
 
         /* Staklena kartica */
         .mt-card {{
