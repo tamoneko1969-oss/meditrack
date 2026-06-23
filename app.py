@@ -220,6 +220,15 @@ def inject_css(mode: str) -> None:
             padding:10px 4px !important; font-size:.82rem !important;
             line-height:1.1 !important; white-space:nowrap;
         }}
+
+        /* Smart Camera: veliki (skoro pun ekran) preview umesto malog prozora */
+        div[data-testid="stCameraInput"] {{ width:100% !important; }}
+        div[data-testid="stCameraInput"] > div {{ width:100% !important; max-width:100% !important; }}
+        div[data-testid="stCameraInput"] video,
+        div[data-testid="stCameraInput"] img {{
+            width:100% !important; height:auto !important; max-height:76vh !important;
+            object-fit:cover !important; border-radius:16px !important;
+        }}
         </style>
         """,
         unsafe_allow_html=True,
