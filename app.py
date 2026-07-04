@@ -1477,6 +1477,52 @@ def render_entry():
                 st.rerun()
 
     with t2:
+        st.markdown("##### 📎 Otpremi lekarski izveštaj — AI izvuče dijagnoze")
+        dx_imgs = st.file_uploader(
+            "Otpremi izveštaj/otpusnu listu (slika, može više)",
+            type=["png", "jpg", "jpeg", "webp"], accept_multiple_files=True,
+            key="dx_upload")
+        if dx_imgs:
+            if not api_ready:
+                st.warning("Unesi ANTHROPIC_API_KEY u ⚙️ (bočna traka) da bi AI pročitao izveštaj.")
+            elif st.button("🔍 Pročitaj i sačuvaj dijagnoze", type="primary", key="dx_analyze"):
+                for i, img in enumerate(dx_imgs, 1):
+                    if len(dx_imgs) > 1:
+                        st.markdown(f"**🖼️ Slika {i} / {len(dx_imgs)}**")
+                    try:
+                        b64 = image_to_b64(img)
+                        if not b64:
+                            st.error("Ne mogu da pročitam sliku.")
+                            continue
+                        ocr_text = ""
+                        if google_ready:
+                            try:
+                                ocr_text = google_ocr(b64, google_key)
+                            except Exception:  # noqa: BLE001
+                                ocr_text = ""
+                        with st.spinner(f"AI čita izveštaj… (slika {i})"):
+                            res = smart_analyze(b64, ocr_text, model_id, api_key)
+                        doc = res.get("document") or {}
+                        dxs = [str(d).strip() for d in (doc.get("diagnoses") or []) if str(d).strip()]
+                        if dxs:
+                            report = (doc.get("full_text") or doc.get("summary") or "")[:2000]
+                            for d in dxs:
+                                q_exec(
+                                    """INSERT INTO medical_history (diagnosis_name,
+                                       doctor_report_text,date_diagnosed,status)
+                                       VALUES (?,?,?,?)""",
+                                    (d, report, date.today().isoformat(), "active"))
+                            st.success("Sačuvane dijagnoze: " + ", ".join(dxs))
+                            if doc.get("summary"):
+                                st.caption(doc["summary"])
+                        else:
+                            st.warning(f"Slika {i}: nisam prepoznao dijagnozu. "
+                                       f"{res.get('notes') or ''} Probaj jasniju sliku.")
+                    except Exception as e:  # noqa: BLE001
+                        st.error(f"Greška na slici {i}: {e}")
+
+        st.divider()
+        st.markdown("##### ✍️ Ručni unos")
         with st.form("dx"):
             name = st.text_input("Naziv dijagnoze")
             report = st.text_area("Izveštaj lekara (opciono)")
