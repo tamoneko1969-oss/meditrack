@@ -1495,6 +1495,42 @@ def render_entry():
                     st.warning("Unesi naziv dijagnoze.")
 
     with t3:
+        st.markdown("##### 📎 Otpremi sliku nalaza — AI pročita i upiše parametre")
+        lab_imgs = st.file_uploader(
+            "Otpremi laboratorijski nalaz (slika, može više)",
+            type=["png", "jpg", "jpeg", "webp"], accept_multiple_files=True,
+            key="lab_upload")
+        if lab_imgs:
+            if not api_ready:
+                st.warning("Unesi ANTHROPIC_API_KEY u ⚙️ (bočna traka) da bi AI pročitao nalaz.")
+            elif st.button("🔍 Pročitaj i sačuvaj nalaze", type="primary", key="lab_analyze"):
+                for i, img in enumerate(lab_imgs, 1):
+                    if len(lab_imgs) > 1:
+                        st.markdown(f"**🖼️ Slika {i} / {len(lab_imgs)}**")
+                    try:
+                        b64 = image_to_b64(img)
+                        if not b64:
+                            st.error("Ne mogu da pročitam sliku.")
+                            continue
+                        ocr_text = ""
+                        if google_ready:
+                            try:
+                                ocr_text = google_ocr(b64, google_key)
+                            except Exception:  # noqa: BLE001
+                                ocr_text = ""
+                        with st.spinner(f"AI čita nalaz… (slika {i})"):
+                            res = smart_analyze(b64, ocr_text, model_id, api_key)
+                        doc = res.get("document")
+                        if doc and doc.get("lab_results"):
+                            _store_and_show_doc(doc)
+                        else:
+                            st.warning(f"Slika {i}: nisam prepoznao lab parametre. "
+                                       f"{res.get('notes') or ''} Probaj jasniju sliku.")
+                    except Exception as e:  # noqa: BLE001
+                        st.error(f"Greška na slici {i}: {e}")
+
+        st.divider()
+        st.markdown("##### ✍️ Ručni unos")
         with st.form("lab"):
             c1, c2 = st.columns(2)
             pname = c1.text_input("Parametar (npr. Glukoza)")
