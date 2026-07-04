@@ -859,20 +859,42 @@ def _claude_image_block(image_b64: str) -> dict:
             "source": {"type": "base64", "media_type": "image/jpeg", "data": image_b64}}
 
 
-def smart_analyze(image_b64: str, ocr_text: str, model_id: str, api_key: str) -> dict:
-    """Jedan poziv: Claude ČITA SAMU SLIKU (pouzdano za LCD/cifre), klasifikuje i
-    izvlači podatke. Google OCR tekst je samo pomoćni nagoveštaj."""
+def prepare_media(uploaded_file) -> tuple[dict, str]:
+    """Iz uploada pravi Anthropic blok (slika ili PDF dokument) + opcioni OCR tekst.
+    PDF ide Claude-u direktno; slika se skalira i (ako ima Google ključa) OCR-uje."""
+    name = (getattr(uploaded_file, "name", "") or "").lower()
+    if name.endswith(".pdf"):
+        data = uploaded_file.getvalue() if hasattr(uploaded_file, "getvalue") else uploaded_file.read()
+        b64 = base64.standard_b64encode(data).decode("utf-8")
+        block = {"type": "document",
+                 "source": {"type": "base64", "media_type": "application/pdf", "data": b64}}
+        return block, ""
+    b64 = image_to_b64(uploaded_file)
+    if not b64:
+        raise ValueError("Ne mogu da pročitam sliku.")
+    ocr_text = ""
+    if google_ready:
+        try:
+            ocr_text = google_ocr(b64, google_key)
+        except Exception:  # noqa: BLE001
+            ocr_text = ""
+    return _claude_image_block(b64), ocr_text
+
+
+def smart_analyze(media_block: dict, ocr_text: str, model_id: str, api_key: str) -> dict:
+    """Jedan poziv: Claude ČITA SAM PRILOG (slika/PDF — pouzdano za LCD/cifre i nalaze),
+    klasifikuje i izvlači podatke. Google OCR tekst je samo pomoćni nagoveštaj."""
     client = _make_client(api_key)
     ctx = build_health_context()
     content = [
         {"type": "text", "text": f"ZDRAVSTVENI PROFIL KORISNIKA:\n{ctx}"},
-        {"type": "text", "text": "FOTOGRAFIJA — čitaj PRVENSTVENO direktno sa slike "
-         "(naročito brojeve na ekranu/LCD-u, deklaracije i nalaze):"},
-        _claude_image_block(image_b64),
+        {"type": "text", "text": "PRILOG (slika ili PDF) — čitaj PRVENSTVENO direktno sa "
+         "priloga (brojevi na ekranu/LCD-u, deklaracije, laboratorijski nalazi, izveštaji):"},
+        media_block,
     ]
     if ocr_text:
         content.append({"type": "text", "text": "Pomoćni OCR tekst (može imati grešaka — "
-                        f"SLIKA ima prednost):\n\"\"\"\n{ocr_text}\n\"\"\""})
+                        f"PRILOG ima prednost):\n\"\"\"\n{ocr_text}\n\"\"\""})
     content.append({"type": "text", "text":
                     "Klasifikuj i izvuci podatke. Vrati ISKLJUČIVO JSON prema strukturi."})
     with client.messages.stream(
@@ -1211,47 +1233,37 @@ def render_camera():
         images = [one] if one else []
     else:
         images = st.file_uploader(
-            "Otpremi slike — možeš izabrati 5 i više odjednom",
-            type=["png", "jpg", "jpeg", "webp"], accept_multiple_files=True) or []
+            "Otpremi slike ili PDF — možeš izabrati 5 i više odjednom",
+            type=["png", "jpg", "jpeg", "webp", "pdf"], accept_multiple_files=True) or []
 
     if not api_ready:
-        st.warning("Unesi ANTHROPIC_API_KEY u ⚙️ (bočna traka) — Claude čita sliku i radi procenu.")
+        st.warning("Unesi ANTHROPIC_API_KEY u ⚙️ (bočna traka) — Claude čita prilog i radi procenu.")
         return
     if not images:
-        st.caption("Izaberi jednu ili više slika iz galerije (ili prebaci na Kamera).")
+        st.caption("Izaberi jednu ili više datoteka iz galerije (ili prebaci na Kamera).")
         return
 
-    st.caption(f"Spremno za analizu: **{len(images)}** slika. "
-               f"{'Google Vision pomaže pri čitanju teksta.' if google_ready else ''}")
+    st.caption(f"Spremno za analizu: **{len(images)}** "
+               f"{'datoteka' if len(images) != 1 else 'datoteka'}.")
     if st.button(f"🔍 Analiziraj ({len(images)})", type="primary", use_container_width=True):
         ok = 0
         for i, img_file in enumerate(images, 1):
             if len(images) > 1:
-                st.markdown(f"#### 🖼️ Slika {i} / {len(images)}")
+                st.markdown(f"#### 🖼️ Prilog {i} / {len(images)}")
             try:
-                b64 = image_to_b64(img_file)
-                if not b64:
-                    st.error("Ne mogu da pročitam sliku.")
-                    continue
-                # Google OCR je samo pomoćni nagoveštaj — Claude čita samu sliku
-                ocr_text = ""
-                if google_ready:
-                    try:
-                        ocr_text = google_ocr(b64, google_key)
-                    except Exception:  # noqa: BLE001
-                        ocr_text = ""
-                    if ocr_text:
-                        with st.expander("📝 Pomoćni OCR tekst (Google Vision)"):
-                            st.text(ocr_text)
-                with st.spinner(f"Mozak čita sliku i obrađuje… (slika {i})"):
-                    res = smart_analyze(b64, ocr_text, model_id, api_key)
+                block, ocr_text = prepare_media(img_file)
+                if ocr_text:
+                    with st.expander("📝 Pomoćni OCR tekst (Google Vision)"):
+                        st.text(ocr_text)
+                with st.spinner(f"Mozak čita prilog i obrađuje… ({i})"):
+                    res = smart_analyze(block, ocr_text, model_id, api_key)
                 if _handle_scan_result(res):
                     ok += 1
             except Exception as e:  # noqa: BLE001
-                st.error(f"Greška na slici {i}: {e}")
+                st.error(f"Greška na prilogu {i}: {e}")
             if len(images) > 1:
                 st.divider()
-        st.success(f"✅ Obrađeno {ok} / {len(images)} slika.")
+        st.success(f"✅ Obrađeno {ok} / {len(images)} datoteka.")
         if st.session_state.pop("go_to_entry", False):
             st.session_state["view"] = "Unos podataka"
             st.rerun()
@@ -1479,8 +1491,8 @@ def render_entry():
     with t2:
         st.markdown("##### 📎 Otpremi lekarski izveštaj — AI izvuče dijagnoze")
         dx_imgs = st.file_uploader(
-            "Otpremi izveštaj/otpusnu listu (slika, može više)",
-            type=["png", "jpg", "jpeg", "webp"], accept_multiple_files=True,
+            "Otpremi izveštaj/otpusnu listu (slika ili PDF, može više)",
+            type=["png", "jpg", "jpeg", "webp", "pdf"], accept_multiple_files=True,
             key="dx_upload")
         if dx_imgs:
             if not api_ready:
@@ -1488,20 +1500,11 @@ def render_entry():
             elif st.button("🔍 Pročitaj i sačuvaj dijagnoze", type="primary", key="dx_analyze"):
                 for i, img in enumerate(dx_imgs, 1):
                     if len(dx_imgs) > 1:
-                        st.markdown(f"**🖼️ Slika {i} / {len(dx_imgs)}**")
+                        st.markdown(f"**🖼️ Prilog {i} / {len(dx_imgs)}**")
                     try:
-                        b64 = image_to_b64(img)
-                        if not b64:
-                            st.error("Ne mogu da pročitam sliku.")
-                            continue
-                        ocr_text = ""
-                        if google_ready:
-                            try:
-                                ocr_text = google_ocr(b64, google_key)
-                            except Exception:  # noqa: BLE001
-                                ocr_text = ""
-                        with st.spinner(f"AI čita izveštaj… (slika {i})"):
-                            res = smart_analyze(b64, ocr_text, model_id, api_key)
+                        block, ocr_text = prepare_media(img)
+                        with st.spinner(f"AI čita izveštaj… ({i})"):
+                            res = smart_analyze(block, ocr_text, model_id, api_key)
                         doc = res.get("document") or {}
                         dxs = [str(d).strip() for d in (doc.get("diagnoses") or []) if str(d).strip()]
                         if dxs:
@@ -1541,10 +1544,10 @@ def render_entry():
                     st.warning("Unesi naziv dijagnoze.")
 
     with t3:
-        st.markdown("##### 📎 Otpremi sliku nalaza — AI pročita i upiše parametre")
+        st.markdown("##### 📎 Otpremi nalaz (slika ili PDF) — AI pročita i upiše parametre")
         lab_imgs = st.file_uploader(
-            "Otpremi laboratorijski nalaz (slika, može više)",
-            type=["png", "jpg", "jpeg", "webp"], accept_multiple_files=True,
+            "Otpremi laboratorijski nalaz (slika ili PDF, može više)",
+            type=["png", "jpg", "jpeg", "webp", "pdf"], accept_multiple_files=True,
             key="lab_upload")
         if lab_imgs:
             if not api_ready:
@@ -1552,28 +1555,19 @@ def render_entry():
             elif st.button("🔍 Pročitaj i sačuvaj nalaze", type="primary", key="lab_analyze"):
                 for i, img in enumerate(lab_imgs, 1):
                     if len(lab_imgs) > 1:
-                        st.markdown(f"**🖼️ Slika {i} / {len(lab_imgs)}**")
+                        st.markdown(f"**🖼️ Prilog {i} / {len(lab_imgs)}**")
                     try:
-                        b64 = image_to_b64(img)
-                        if not b64:
-                            st.error("Ne mogu da pročitam sliku.")
-                            continue
-                        ocr_text = ""
-                        if google_ready:
-                            try:
-                                ocr_text = google_ocr(b64, google_key)
-                            except Exception:  # noqa: BLE001
-                                ocr_text = ""
-                        with st.spinner(f"AI čita nalaz… (slika {i})"):
-                            res = smart_analyze(b64, ocr_text, model_id, api_key)
+                        block, ocr_text = prepare_media(img)
+                        with st.spinner(f"AI čita nalaz… ({i})"):
+                            res = smart_analyze(block, ocr_text, model_id, api_key)
                         doc = res.get("document")
                         if doc and doc.get("lab_results"):
                             _store_and_show_doc(doc)
                         else:
-                            st.warning(f"Slika {i}: nisam prepoznao lab parametre. "
-                                       f"{res.get('notes') or ''} Probaj jasniju sliku.")
+                            st.warning(f"Prilog {i}: nisam prepoznao lab parametre. "
+                                       f"{res.get('notes') or ''} Probaj jasniji prilog.")
                     except Exception as e:  # noqa: BLE001
-                        st.error(f"Greška na slici {i}: {e}")
+                        st.error(f"Greška na prilogu {i}: {e}")
 
         st.divider()
         st.markdown("##### ✍️ Ručni unos")
