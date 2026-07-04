@@ -1748,26 +1748,6 @@ def render_entry():
                     except Exception as e:  # noqa: BLE001
                         st.error(f"Greška na prilogu {i}: {e}")
 
-        st.divider()
-        st.markdown("##### ✍️ Ručni unos")
-        with st.form("lab"):
-            c1, c2 = st.columns(2)
-            pname = c1.text_input("Parametar (npr. Glukoza)")
-            val = c2.number_input("Vrednost", value=0.0, format="%.2f")
-            c3, c4, c5 = st.columns(3)
-            unit = c3.text_input("Jedinica", "mmol/L")
-            ref = c4.text_input("Referentni opseg", "")
-            tdate = c5.date_input("Datum nalaza", date.today())
-            if st.form_submit_button("Sačuvaj nalaz", type="primary"):
-                if pname.strip():
-                    q_exec(
-                        """INSERT INTO lab_results (parameter_name,value,unit,
-                           reference_range,test_date) VALUES (?,?,?,?,?)""",
-                        (pname.strip(), val, unit, ref, tdate.isoformat()))
-                    st.success("Laboratorijski nalaz sačuvan.")
-                else:
-                    st.warning("Unesi naziv parametra.")
-
 
 # =========================================================================== #
 #  VIEW: ISTORIJA
