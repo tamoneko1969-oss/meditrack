@@ -24,6 +24,7 @@ Pokretanje:
 """
 
 import base64
+import hashlib
 import io
 import json
 import os
@@ -398,6 +399,9 @@ def init_db() -> None:
         f"""CREATE TABLE IF NOT EXISTS user_profile (
             id INTEGER PRIMARY KEY, age INTEGER, height_cm INTEGER,
             weight_kg {real}, sex TEXT, updated_at TEXT)""",
+        """CREATE TABLE IF NOT EXISTS daily_reports (
+            id INTEGER PRIMARY KEY, report_date TEXT, generated_at TEXT,
+            signature TEXT, content TEXT)""",
     ]
     conn = get_conn()
     try:
@@ -502,6 +506,33 @@ def compute_bmi(height_cm, weight_kg):
     else:
         cat = "gojaznost"
     return (round(bmi, 1), cat)
+
+
+def data_signature() -> str:
+    """Potpis stanja svih unosa — menja se čim se doda novi unos/dokument/profil."""
+    v = q_one("SELECT COUNT(*) c, MAX(timestamp) m FROM user_vitals")
+    l = q_one("SELECT COUNT(*) c, MAX(test_date) m FROM lab_results")
+    d = q_one("SELECT COUNT(*) c, MAX(date_diagnosed) m FROM medical_history")
+    s = q_one("SELECT COUNT(*) c, MAX(timestamp) m FROM scanned_products_log")
+    p = get_profile()
+    raw = (f"{v['c']}|{v['m']}|{l['c']}|{l['m']}|{d['c']}|{d['m']}|"
+           f"{s['c']}|{s['m']}|{p['updated_at'] if p else '-'}")
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()
+
+
+def get_daily_report():
+    return q_one("SELECT * FROM daily_reports WHERE id = 1")
+
+
+def save_daily_report(report_date: str, signature: str, content: str) -> None:
+    q_exec(
+        """INSERT INTO daily_reports (id, report_date, generated_at, signature, content)
+           VALUES (1, ?, ?, ?, ?)
+           ON CONFLICT (id) DO UPDATE SET report_date=excluded.report_date,
+             generated_at=excluded.generated_at, signature=excluded.signature,
+             content=excluded.content""",
+        (report_date, datetime.now().isoformat(), signature, content),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -750,6 +781,95 @@ def health_guard(model_id: str, api_key: str) -> dict:
         resp = stream.get_final_message()
     raw = "".join(b.text for b in resp.content if b.type == "text")
     return _parse_json(raw)
+
+
+def _vitals_trend_summary() -> str:
+    """Kratak tekstualni sažetak trenda vitalnih znakova (7 dana) za AI."""
+    rows = vitals_series(7)
+    if not rows:
+        return "nema merenja u poslednjih 7 dana"
+    sys = [r["blood_pressure_sys"] for r in rows if r["blood_pressure_sys"]]
+    dia = [r["blood_pressure_dia"] for r in rows if r["blood_pressure_dia"]]
+    hr = [r["heart_rate"] for r in rows if r["heart_rate"]]
+    parts = [f"{len(rows)} merenja u 7 dana"]
+    if sys:
+        parts.append(f"SYS prosek {sum(sys)/len(sys):.0f} (raspon {min(sys)}-{max(sys)}, "
+                     f"poslednji {sys[-1]})")
+    if dia:
+        parts.append(f"DIA prosek {sum(dia)/len(dia):.0f} (poslednji {dia[-1]})")
+    if hr:
+        parts.append(f"puls prosek {sum(hr)/len(hr):.0f}")
+    return "; ".join(parts)
+
+
+DAILY_SYSTEM = """Ti si lični lekar-asistent koji SVAKODNEVNO procenjuje STANJE \
+ORGANIZMA korisnika. Na osnovu njegovog LIČNOG PROFILA (godine, visina, težina, BMI, \
+pol), poslednjih vitalnih znakova i njihovog TRENDA, laboratorijskih nalaza i aktivnih \
+dijagnoza — daj sažetu, personalizovanu dnevnu procenu. Sve norme i preporuke prilagodi \
+BAŠ TOJ osobi (po godinama, telesnoj masi/BMI, polu). Ne daj generičke savete.
+
+VRATI ISKLJUČIVO validan JSON (bez markdown ograda):
+{
+  "overall": "GREEN" | "YELLOW" | "RED",
+  "score": <ceo broj 0-100 — dnevni indeks organizma>,
+  "headline": "<kratka ocena, do 8 reči>",
+  "summary": "<2-4 rečenice dnevnog stanja organizma>",
+  "insights": [ {"status":"GREEN|YELLOW|RED","title":"<kratko>","message":"<1-2 rečenice>"} ],
+  "focus": ["<konkretna preporuka za DANAS>", "..."]
+}
+Piši na srpskom. Budi koristan i jasan kod realnih rizika, ali nealarmantan.
+Ako nema dovoljno podataka, budi iskren u summary i predloži šta korisnik da unese."""
+
+
+def generate_daily_report(model_id: str, api_key: str) -> dict:
+    client = _make_client(api_key)
+    ctx = build_health_context()
+    trend = _vitals_trend_summary()
+    msg = (f"ZDRAVSTVENI PROFIL I PODACI:\n{ctx}\n\n"
+           f"TREND VITALNIH ZNAKOVA (7 dana): {trend}\n\n"
+           f"Datum: {date.today():%d.%m.%Y}. Daj DNEVNO STANJE ORGANIZMA kao JSON.")
+    with client.messages.stream(
+        model=model_id, max_tokens=1200, system=DAILY_SYSTEM,
+        messages=[{"role": "user", "content": msg}],
+    ) as stream:
+        resp = stream.get_final_message()
+    raw = "".join(b.text for b in resp.content if b.type == "text")
+    return _parse_json(raw)
+
+
+def ensure_daily_report(force: bool = False):
+    """Pri pokretanju: ako ima novih unosa/dokumenata ili je novi dan, regeneriše
+    dnevno stanje organizma; inače vraća keširano. Ne troši API bez potrebe."""
+    if not api_ready:
+        return None
+    sig = data_signature()
+    today = date.today().isoformat()
+    rep = get_daily_report()
+    stale = force or (rep is None) or (rep["report_date"] != today) or (rep["signature"] != sig)
+    if stale:
+        with st.spinner("🧬 AI procenjuje dnevno stanje organizma…"):
+            try:
+                data = generate_daily_report(model_id, api_key)
+            except Exception as e:  # noqa: BLE001
+                em = str(e).lower()
+                if "credit balance" in em or "billing" in em or "quota" in em:
+                    st.warning("💳 Anthropic nalog nema kredita — dopuni na "
+                               "console.anthropic.com → Plans & Billing da bi AI procene radile "
+                               "(dnevno stanje, Smart Camera, čitanje nalaza).")
+                else:
+                    st.warning(f"Ne mogu sada da generišem dnevno stanje: {e}")
+                if rep:
+                    try:
+                        return json.loads(rep["content"])
+                    except Exception:  # noqa: BLE001
+                        return None
+                return None
+        save_daily_report(today, sig, json.dumps(data, ensure_ascii=False))
+        return data
+    try:
+        return json.loads(rep["content"])
+    except Exception:  # noqa: BLE001
+        return None
 
 
 VITALS_SYSTEM = """Ti čitaš VREDNOSTI sa ekrana medicinskog uređaja na osnovu OCR \
@@ -1073,6 +1193,41 @@ def render_dashboard():
 
     st.write("")
 
+    # --- Dnevno stanje organizma (auto: regeneriše se na nove unose / novi dan) ---
+    report = ensure_daily_report(force=st.session_state.pop("force_daily", False))
+    if report:
+        dcol = VERDICT.get(str(report.get("overall", "YELLOW")).upper(), VERDICT["YELLOW"])
+        score = report.get("score", "—")
+        focus = report.get("focus") or []
+        focus_html = "".join(f"<li>{f}</li>" for f in focus)
+        st.markdown(f"""
+        <div class='mt-card' style='border:1px solid {dcol}55;
+             box-shadow:0 0 0 1px {dcol}33, 0 14px 34px {dcol}22'>
+          <div style='display:flex;align-items:center;gap:16px'>
+            <div style='flex:0 0 auto;width:74px;height:74px;border-radius:50%;
+                 display:grid;place-items:center;background:{dcol}1A;border:2px solid {dcol}'>
+              <div style='font-size:1.5rem;font-weight:900;color:{dcol}'>{score}</div>
+            </div>
+            <div>
+              <div class='mt-muted' style='letter-spacing:1px;font-size:.72rem'>
+                🧬 DNEVNO STANJE ORGANIZMA</div>
+              <div style='font-size:1.15rem;font-weight:800;color:{dcol}'>{report.get('headline','')}</div>
+            </div>
+          </div>
+          <p style='margin:12px 0 0'>{report.get('summary','')}</p>
+          {("<b style='font-size:.85rem'>Fokus danas:</b><ul style='margin:6px 0 0;padding-left:18px'>" + focus_html + "</ul>") if focus else ""}
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("🔄 Osveži dnevno stanje", key="refresh_daily"):
+            st.session_state["force_daily"] = True
+            st.rerun()
+        st.session_state["daily_insights"] = report.get("insights") or []
+    elif not api_ready:
+        st.info("Unesi ANTHROPIC_API_KEY (⚙️ levo) — MediTrack tada svakog dana automatski "
+                "proverava nove unose i procenjuje dnevno stanje organizma.")
+
+    st.write("")
+
     # --- Telefon-ekran: glavni vitalni znaci (jedan ispod drugog, sa vizualima) ---
     if v:
         bp = (f"{v['blood_pressure_sys']}/{v['blood_pressure_dia']}"
@@ -1180,17 +1335,13 @@ def render_dashboard():
 
     with cc_right:
         st.markdown("### ✨ AI Health Guard")
+        insights = st.session_state.get("daily_insights", [])
         if not api_ready:
             st.caption("Unesi API ključ u ⚙️ (levo) za personalizovane uvide.")
-        elif st.button("Generiši dnevne uvide", use_container_width=True):
-            with st.spinner("AI analizira tvoj profil…"):
-                try:
-                    data = health_guard(model_id, api_key)
-                    st.session_state["guard"] = data.get("insights", [])
-                except Exception as e:  # noqa: BLE001
-                    st.error(f"Greška: {e}")
-        for ins in st.session_state.get("guard", []):
-            col = VERDICT.get(ins.get("status", "YELLOW"), VERDICT["YELLOW"])
+        elif not insights:
+            st.caption("Uvidi se generišu uz dnevno stanje organizma (gore).")
+        for ins in insights:
+            col = VERDICT.get(str(ins.get("status", "YELLOW")).upper(), VERDICT["YELLOW"])
             st.markdown(
                 f"<div class='mt-guard' style='border-color:{col};background:{col}1A'>"
                 f"<b style='color:{col}'>{ins.get('title','')}</b><br>{ins.get('message','')}</div>",
