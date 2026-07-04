@@ -404,8 +404,8 @@ def init_db() -> None:
             signature TEXT, content TEXT)""",
         """CREATE TABLE IF NOT EXISTS consortium_reports (
             id INTEGER PRIMARY KEY, generated_at TEXT, signature TEXT, content TEXT)""",
-        """CREATE TABLE IF NOT EXISTS ckg_edges (
-            id INTEGER PRIMARY KEY, src TEXT, rel TEXT, dst TEXT)""",
+        f"""CREATE TABLE IF NOT EXISTS ckg_edges (
+            id {pk}, src TEXT, rel TEXT, dst TEXT)""",
     ]
     conn = get_conn()
     try:
