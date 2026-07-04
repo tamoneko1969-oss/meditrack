@@ -637,7 +637,35 @@ def _parse_json(raw: str) -> dict:
     start, end = raw.find("{"), raw.rfind("}")
     if start != -1 and end != -1:
         raw = raw[start : end + 1]
-    return json.loads(raw)
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        # Robusno popravljanje neispravnog/odsečenog JSON-a iz LLM-a
+        try:
+            import json_repair
+            fixed = json_repair.loads(raw)
+            if isinstance(fixed, dict):
+                return fixed
+        except Exception:  # noqa: BLE001
+            pass
+        return _repair_json_fallback(raw)
+
+
+def _repair_json_fallback(raw: str) -> dict:
+    """Rezervno popravljanje bez zavisnosti: zatvara nedovršene stringove/zagrade
+    (npr. kad se odgovor odsekao na max_tokens)."""
+    s = raw
+    # ako je string ostao otvoren, zatvori ga
+    if s.count('"') % 2 == 1:
+        s += '"'
+    # ukloni eventualni trailing zarez
+    s = s.rstrip().rstrip(",")
+    # dopuni nedostajuće zatvarajuće ] i }
+    opens = s.count("{") - s.count("}")
+    brs = s.count("[") - s.count("]")
+    s += "]" * max(0, brs)
+    s += "}" * max(0, opens)
+    return json.loads(s)
 
 
 def build_health_context() -> str:
@@ -1018,7 +1046,7 @@ def smart_analyze(media_block: dict, ocr_text: str, model_id: str, api_key: str)
     content.append({"type": "text", "text":
                     "Klasifikuj i izvuci podatke. Vrati ISKLJUČIVO JSON prema strukturi."})
     with client.messages.stream(
-        model=model_id, max_tokens=2200, system=SMART_ROUTER_SYSTEM,
+        model=model_id, max_tokens=4096, system=SMART_ROUTER_SYSTEM,
         messages=[{"role": "user", "content": content}],
     ) as stream:
         resp = stream.get_final_message()
