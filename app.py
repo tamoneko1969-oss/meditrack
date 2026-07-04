@@ -402,6 +402,10 @@ def init_db() -> None:
         """CREATE TABLE IF NOT EXISTS daily_reports (
             id INTEGER PRIMARY KEY, report_date TEXT, generated_at TEXT,
             signature TEXT, content TEXT)""",
+        """CREATE TABLE IF NOT EXISTS consortium_reports (
+            id INTEGER PRIMARY KEY, generated_at TEXT, signature TEXT, content TEXT)""",
+        """CREATE TABLE IF NOT EXISTS ckg_edges (
+            id INTEGER PRIMARY KEY, src TEXT, rel TEXT, dst TEXT)""",
     ]
     conn = get_conn()
     try:
@@ -533,6 +537,358 @@ def save_daily_report(report_date: str, signature: str, content: str) -> None:
              content=excluded.content""",
         (report_date, datetime.now().isoformat(), signature, content),
     )
+
+
+# =========================================================================== #
+#  SLOJ 2: NORMALIZACIJA (LOINC) + VREMENSKA LINIJA + TREND VELOCITY
+# =========================================================================== #
+# Interni terminološki rečnik: kanonski naziv → LOINC kod, kanonska jedinica,
+# sinonimi (srpski/nemački/engleski), smer pogoršanja i konverzije jedinica.
+LOINC_MAP = {
+    "Kalijum":     {"loinc": "2823-3",  "unit": "mmol/L", "bad": "up",
+                    "syn": ["kalijum", "kalium", "potassium", "k+", "k "],
+                    "ref": (3.5, 5.1)},
+    "Natrijum":    {"loinc": "2951-2",  "unit": "mmol/L", "bad": "both",
+                    "syn": ["natrijum", "natrium", "sodium", "na+"], "ref": (136, 145)},
+    "Hlorid":      {"loinc": "2075-0",  "unit": "mmol/L", "bad": "both",
+                    "syn": ["hlorid", "chlorid", "chloride", "cl-"], "ref": (98, 107)},
+    "Kalcijum":    {"loinc": "17861-6", "unit": "mmol/L", "bad": "both",
+                    "syn": ["kalcijum", "calcium", "kalzium", "ca "], "ref": (2.1, 2.6)},
+    "Magnezijum":  {"loinc": "19123-9", "unit": "mmol/L", "bad": "both",
+                    "syn": ["magnezijum", "magnesium", "mg "], "ref": (0.66, 1.07)},
+    "Kreatinin":   {"loinc": "2160-0",  "unit": "mg/dL",  "bad": "up",
+                    "syn": ["kreatinin", "creatinine", "krea"], "ref": (0.7, 1.3),
+                    "convert": {"µmol/l": 1 / 88.42, "umol/l": 1 / 88.42}},
+    "eGFR":        {"loinc": "62238-1", "unit": "ml/min", "bad": "down",
+                    "syn": ["egfr", "gfr", "glomerularna filtracija", "ckd-epi"],
+                    "ref": (90, 200)},
+    "Urea":        {"loinc": "22664-7", "unit": "mg/dL",  "bad": "up",
+                    "syn": ["urea", "harnstoff", "bun", "azot ureje"], "ref": (17, 43)},
+    "Mokraćna kiselina": {"loinc": "3084-1", "unit": "mg/dL", "bad": "up",
+                    "syn": ["mokraćna kiselina", "mokracna", "harnsäure", "harnsaure",
+                            "uric acid", "urat"], "ref": (3.5, 7.2)},
+    "Glukoza":     {"loinc": "2345-7",  "unit": "mmol/L", "bad": "up",
+                    "syn": ["glukoza", "glucose", "glukose", "šećer", "secer"],
+                    "ref": (3.9, 5.5), "convert": {"mg/dl": 1 / 18.016}},
+    "HbA1c":       {"loinc": "4548-4",  "unit": "%",      "bad": "up",
+                    "syn": ["hba1c", "glikozilirani"], "ref": (4.0, 5.7)},
+    "TSH":         {"loinc": "3016-3",  "unit": "mU/L",   "bad": "both",
+                    "syn": ["tsh", "tireostimulišući"], "ref": (0.35, 4.94)},
+    "Holesterol":  {"loinc": "2093-3",  "unit": "mmol/L", "bad": "up",
+                    "syn": ["holesterol", "cholesterin", "cholesterol ukupni",
+                            "cholesterol"], "ref": (0, 5.2), "convert": {"mg/dl": 1 / 38.67}},
+    "LDL":         {"loinc": "13457-7", "unit": "mmol/L", "bad": "up",
+                    "syn": ["ldl"], "ref": (0, 3.0), "convert": {"mg/dl": 1 / 38.67}},
+    "HDL":         {"loinc": "2085-9",  "unit": "mmol/L", "bad": "down",
+                    "syn": ["hdl"], "ref": (1.0, 3.0), "convert": {"mg/dl": 1 / 38.67}},
+    "Trigliceridi": {"loinc": "2571-8", "unit": "mmol/L", "bad": "up",
+                    "syn": ["triglicerid", "triglyzerid", "triglyceride"],
+                    "ref": (0, 1.7), "convert": {"mg/dl": 1 / 88.57}},
+    "AST":         {"loinc": "1920-8",  "unit": "U/L",    "bad": "up",
+                    "syn": ["ast", "got", "aspartat"], "ref": (0, 40)},
+    "ALT":         {"loinc": "1742-6",  "unit": "U/L",    "bad": "up",
+                    "syn": ["alt", "gpt", "alanin"], "ref": (0, 41)},
+    "Gama-GT":     {"loinc": "2324-2",  "unit": "U/L",    "bad": "up",
+                    "syn": ["gama-gt", "gamma-gt", "ggt", "gama gt"], "ref": (0, 60)},
+    "Bilirubin":   {"loinc": "1975-2",  "unit": "mg/dL",  "bad": "up",
+                    "syn": ["bilirubin"], "ref": (0, 1.2)},
+    "ALP":         {"loinc": "6768-6",  "unit": "U/L",    "bad": "up",
+                    "syn": ["alkalna fosfataza", "alkalische phosphatase", "alp"],
+                    "ref": (40, 130)},
+    "Gvožđe":      {"loinc": "2498-4",  "unit": "µmol/L", "bad": "down",
+                    "syn": ["gvožđe", "gvozdje", "eisen", "iron", "fe "], "ref": (11, 28),
+                    "convert": {"µg/dl": 0.179, "ug/dl": 0.179}},
+    "Feritin":     {"loinc": "2276-4",  "unit": "µg/L",   "bad": "down",
+                    "syn": ["feritin", "ferritin"], "ref": (30, 400)},
+    "Vitamin B12": {"loinc": "2132-9",  "unit": "ng/L",   "bad": "down",
+                    "syn": ["b12", "kobalamin", "cobalamin"], "ref": (197, 771)},
+    "Folna kiselina": {"loinc": "2284-8", "unit": "µg/L", "bad": "down",
+                    "syn": ["folna", "folsäure", "folsaure", "folat", "folate"],
+                    "ref": (3.9, 26.8)},
+    "Hemoglobin":  {"loinc": "718-7",   "unit": "g/L",    "bad": "down",
+                    "syn": ["hemoglobin", "hämoglobin", "hgb", "hb "], "ref": (130, 175),
+                    "convert": {"g/dl": 10.0}},
+    "Leukociti":   {"loinc": "6690-2",  "unit": "10^9/L", "bad": "both",
+                    "syn": ["leukociti", "leukozyten", "wbc", "leukocit"], "ref": (4, 10)},
+    "Trombociti":  {"loinc": "777-3",   "unit": "10^9/L", "bad": "both",
+                    "syn": ["trombociti", "thrombozyten", "plt", "platelet"],
+                    "ref": (150, 400)},
+    "CRP":         {"loinc": "1988-5",  "unit": "mg/L",   "bad": "up",
+                    "syn": ["crp", "c-reaktivni"], "ref": (0, 5)},
+    "PSA":         {"loinc": "2857-1",  "unit": "ng/mL",  "bad": "up",
+                    "syn": ["psa", "prostata specifični"], "ref": (0, 3.1)},
+    "CPK":         {"loinc": "2157-6",  "unit": "U/L",    "bad": "up",
+                    "syn": ["cpk", "ck ", "kreatin kinaza", "creatine kinase"],
+                    "ref": (0, 190)},
+    "LDH":         {"loinc": "14804-9", "unit": "U/L",    "bad": "up",
+                    "syn": ["ldh", "laktat dehidrogenaza"], "ref": (0, 250)},
+    "Eritrociti u urinu": {"loinc": "13945-1", "unit": "/µL", "bad": "up",
+                    "syn": ["eritrociti u urinu", "ery/", "erythrozyten im urin",
+                            "hematurija"], "ref": (0, 25)},
+    "Leukociti u urinu": {"loinc": "30405-5", "unit": "/µL", "bad": "up",
+                    "syn": ["leukociti u urinu", "leu/", "leukozyten im urin"],
+                    "ref": (0, 25)},
+    "Protein u urinu": {"loinc": "2888-6", "unit": "mg/dL", "bad": "up",
+                    "syn": ["protein u urinu", "proteinurija", "eiweiß im urin"],
+                    "ref": (0, 15)},
+}
+
+
+def normalize_param(name: str) -> str:
+    """Mapira naziv parametra (sr/de/en varijante) na kanonski naziv iz LOINC_MAP."""
+    n = (name or "").strip().lower()
+    if not n:
+        return name
+    for canon, meta in LOINC_MAP.items():
+        if canon.lower() == n:
+            return canon
+        for s in meta["syn"]:
+            if s in n or n in s:
+                return canon
+    return name.strip()
+
+
+def canon_value(canon: str, value: float, unit: str) -> tuple[float, str]:
+    """Konvertuje vrednost u kanonsku jedinicu (npr. mg/dL → mmol/L) ako je mapa zna."""
+    meta = LOINC_MAP.get(canon)
+    if not meta:
+        return value, unit
+    u = (unit or "").strip().lower().replace(" ", "")
+    cu = meta["unit"].lower().replace(" ", "")
+    if u == cu or not u:
+        return value, meta["unit"]
+    for src, factor in (meta.get("convert") or {}).items():
+        if u == src.replace(" ", ""):
+            return round(value * factor, 3), meta["unit"]
+    return value, unit  # nepoznata jedinica — ostavi kako jeste
+
+
+def lab_timeline() -> dict:
+    """Svi lab nalazi poravnati na jednu hronološku osu, po kanonskom parametru:
+    {canon: [(date, value, unit), ...] rastuće po datumu}."""
+    rows = q_all("SELECT parameter_name, value, unit, test_date FROM lab_results "
+                 "ORDER BY test_date ASC, id ASC")
+    tl: dict[str, list] = {}
+    for r in rows:
+        canon = normalize_param(r["parameter_name"])
+        try:
+            val, unit = canon_value(canon, float(r["value"]), r["unit"])
+        except (TypeError, ValueError):
+            continue
+        tl.setdefault(canon, []).append((r["test_date"], val, unit))
+    return tl
+
+
+def trend_velocity() -> list[dict]:
+    """Vremenski ponderisana linearna regresija po parametru. Skoriji podaci nose
+    veću težinu (w = exp(-starost/45d)). Flaguje nepovoljan vektor i unutar
+    referentnog opsega (Trend Velocity umesto binarne provere prag-a)."""
+    import math
+    out = []
+    for canon, pts in lab_timeline().items():
+        if len(pts) < 2:
+            continue
+        meta = LOINC_MAP.get(canon, {})
+        try:
+            xs = [(datetime.fromisoformat(d[:10]) - datetime(2020, 1, 1)).days
+                  for d, _, _ in pts]
+        except ValueError:
+            continue
+        ys = [v for _, v, _ in pts]
+        today_x = (datetime.now() - datetime(2020, 1, 1)).days
+        ws = [math.exp(-(today_x - x) / 45.0) for x in xs]
+        sw = sum(ws)
+        if sw <= 0:
+            continue
+        mx = sum(w * x for w, x in zip(ws, xs)) / sw
+        my = sum(w * y for w, y in zip(ws, ys)) / sw
+        den = sum(w * (x - mx) ** 2 for w, x in zip(ws, xs))
+        if den == 0:
+            continue
+        slope_day = sum(w * (x - mx) * (y - my) for w, x, y in zip(ws, xs, ys)) / den
+        slope_month = slope_day * 30
+        ref = meta.get("ref")
+        span = (ref[1] - ref[0]) if ref and ref[1] > ref[0] else (abs(my) or 1)
+        pct_month = 100 * slope_month / span
+        bad = meta.get("bad")
+        adverse = ((bad == "up" and pct_month > 4) or (bad == "down" and pct_month < -4)
+                   or (bad == "both" and abs(pct_month) > 8))
+        last_d, last_v, last_u = pts[-1]
+        in_range = bool(ref and ref[0] <= last_v <= ref[1])
+        out.append({
+            "param": canon, "loinc": meta.get("loinc", "-"),
+            "last_value": last_v, "unit": last_u, "last_date": last_d,
+            "points": len(pts), "slope_month": round(slope_month, 3),
+            "pct_of_range_per_month": round(pct_month, 1),
+            "in_range": in_range, "adverse_trend": adverse,
+        })
+    return out
+
+
+# =========================================================================== #
+#  SLOJ 1: KRVNI PRITISAK 3x DNEVNO — obrasci i cross-talk okidači
+# =========================================================================== #
+def bp_period(ts: str) -> str:
+    """Klasifikuje merenje: jutro (<11h), popodne (11-17h), veče (17h+)."""
+    try:
+        h = int(ts[11:13])
+    except (ValueError, IndexError):
+        return "nepoznato"
+    return "jutro" if h < 11 else ("popodne" if h < 17 else "veče")
+
+
+def bp_pattern_analysis(days: int = 7) -> dict:
+    """Analiza obrazaca pritiska po dobu dana + cross-talk okidači agenata:
+    jutarnji skok → Endokrinolog+Nefrolog; popodnevne fluktuacije → Hepatolog+
+    Kardiolog; večernji non-dipping → kardiorenalni rizik (Kardiolog+Nefrolog)."""
+    rows = [r for r in vitals_series(days) if r["blood_pressure_sys"]]
+    per: dict[str, list] = {"jutro": [], "popodne": [], "veče": []}
+    for r in rows:
+        p = bp_period(r["timestamp"])
+        if p in per:
+            per[p].append((r["blood_pressure_sys"], r["blood_pressure_dia"] or 0))
+    avg = {p: (round(sum(x[0] for x in v) / len(v)), round(sum(x[1] for x in v) / len(v)))
+           if v else None for p, v in per.items()}
+    triggers, patterns = set(), []
+    j, po, ve = avg["jutro"], avg["popodne"], avg["veče"]
+    if j and ((po and j[0] >= po[0] + 10) or j[0] >= 140):
+        patterns.append(f"JUTARNJI SKOK: prosek jutro {j[0]}/{j[1]} mmHg")
+        triggers.update(["Endokrinolog", "Nefrolog"])
+    if po and j and abs(po[0] - j[0]) >= 15:
+        patterns.append(f"POPODNEVNE FLUKTUACIJE: jutro {j[0]} vs popodne {po[0]} mmHg")
+        triggers.update(["Hepatolog", "Kardiolog"])
+    if ve and j and ve[0] >= j[0] - 2:
+        patterns.append(f"NON-DIPPING (veče visoko): veče {ve[0]}/{ve[1]} vs jutro "
+                        f"{j[0]}/{j[1]} mmHg — povišen kardiorenalni rizik")
+        triggers.update(["Kardiolog", "Nefrolog"])
+    if any(a and a[0] >= 140 for a in (j, po, ve)):
+        triggers.add("Kardiolog")
+    return {"averages": avg, "patterns": patterns, "triggers": sorted(triggers),
+            "readings": len(rows), "days": days}
+
+
+# =========================================================================== #
+#  SLOJ 5: KLINIČKA TRIJAŽA — RED FLAGS (tvrde brave IZVAN LLM-a)
+# =========================================================================== #
+# Pragovi akutne opasnosti. Provera je čist Python — zaobilazi AI u potpunosti.
+def check_red_flags() -> list[dict]:
+    flags = []
+    tl = lab_timeline()
+
+    def last(canon):
+        pts = tl.get(canon) or []
+        return pts[-1] if pts else None
+
+    k = last("Kalijum")
+    if k and k[1] > 6.0:
+        flags.append({"title": "KALIJUM > 6.0 mmol/L (hiperkalemija — rizik po srce)",
+                      "value": f"{k[1]} mmol/L ({k[0]})"})
+    na = last("Natrijum")
+    if na and (na[1] < 125 or na[1] > 155):
+        flags.append({"title": "NATRIJUM u opasnoj zoni",
+                      "value": f"{na[1]} mmol/L ({na[0]})"})
+    glu = last("Glukoza")
+    if glu and (glu[1] > 16.7 or glu[1] < 3.0):
+        flags.append({"title": "GLUKOZA u opasnoj zoni",
+                      "value": f"{glu[1]} mmol/L ({glu[0]})"})
+    hgb = last("Hemoglobin")
+    if hgb and hgb[1] < 70:
+        flags.append({"title": "TEŠKA ANEMIJA (Hemoglobin < 70 g/L)",
+                      "value": f"{hgb[1]} g/L ({hgb[0]})"})
+    ery_u = last("Eritrociti u urinu")
+    if ery_u and ery_u[1] >= 500:
+        flags.append({"title": "TEŠKA HEMATURIJA (krv u urinu)",
+                      "value": f"{ery_u[1]} /µL ({ery_u[0]})"})
+
+    # eGFR: apsolutno < 30 ILI drastičan pad (>25% u odnosu na prethodno merenje)
+    gfr_pts = tl.get("eGFR") or []
+    if gfr_pts:
+        g_last = gfr_pts[-1]
+        if g_last[1] < 30:
+            flags.append({"title": "eGFR < 30 ml/min (teška bubrežna insuficijencija)",
+                          "value": f"{g_last[1]} ml/min ({g_last[0]})"})
+        elif len(gfr_pts) >= 2 and gfr_pts[-2][1] > 0:
+            drop = 100 * (gfr_pts[-2][1] - g_last[1]) / gfr_pts[-2][1]
+            if drop >= 25:
+                flags.append({"title": f"DRASTIČAN PAD eGFR (−{drop:.0f}% između merenja)",
+                              "value": f"{gfr_pts[-2][1]} → {g_last[1]} ml/min"})
+
+    # Hipertenzivna kriza: 2+ uzastopna merenja ≥180 SYS ili ≥120 DIA u 48h
+    recent = [r for r in vitals_series(2) if r["blood_pressure_sys"]]
+    crisis = [r for r in recent if r["blood_pressure_sys"] >= 180
+              or (r["blood_pressure_dia"] or 0) >= 120]
+    if len(crisis) >= 2:
+        last_c = crisis[-1]
+        flags.append({"title": "HIPERTENZIVNA KRIZA (≥180/120, ponovljena merenja)",
+                      "value": f"{last_c['blood_pressure_sys']}/"
+                               f"{last_c['blood_pressure_dia']} mmHg"})
+    return flags
+
+
+def render_red_flag_screen(flags: list[dict]) -> None:
+    """Dominantan kritičан ekran — blokira AI savete (tvrda brava izvan LLM-a)."""
+    items = "".join(
+        f"<li style='margin:6px 0'><b>{f['title']}</b><br>"
+        f"<span style='opacity:.85'>Izmereno: {f['value']}</span></li>" for f in flags)
+    st.markdown(f"""
+    <div style='border:2px solid {VERDICT["RED"]};border-radius:22px;padding:26px;
+         background:{VERDICT["RED"]}22;box-shadow:0 0 40px {VERDICT["RED"]}55'>
+      <div style='font-size:1.6rem;font-weight:900;color:{VERDICT["RED"]}'>
+        ⛔ KRITIČNO UPOZORENJE</div>
+      <p style='margin:10px 0'>Detektovane su vrednosti u zoni akutne opasnosti.
+      <b>Svi nutritivni i lifestyle saveti su obustavljeni.</b>
+      Odmah se javi lekaru ili hitnoj službi (194).</p>
+      <ul style='padding-left:20px'>{items}</ul>
+      <p style='font-size:.8rem;opacity:.8'>Ova provera je ugrađena bezbednosna brava
+      (nezavisna od AI). Saveti se automatski otključavaju kad nove izmerene vrednosti
+      izađu iz kritične zone.</p>
+    </div>""", unsafe_allow_html=True)
+
+
+# =========================================================================== #
+#  SLOJ 2.2: CLINICAL KNOWLEDGE GRAPH (CKG) — patofiziološke veze
+# =========================================================================== #
+# Ivice: (izvor, relacija, cilj). Relacije: INFLUENCES, EXACERBATES, INDICATES,
+# CONTRAINDICATED_BY. Seed-uje se jednom; koristi se u konflikt-rezoluciji.
+CKG_SEED = [
+    ("Kalijum", "CONTRAINDICATED_BY", "Dijeta bogata kalijumom (kod hiperkalemije)"),
+    ("Kalijum", "INFLUENCES", "Srčani ritam"),
+    ("eGFR", "INDICATES", "Bubrežna funkcija"),
+    ("Nizak eGFR", "EXACERBATES", "Hiperkalemija"),
+    ("Nizak eGFR", "CONTRAINDICATED_BY", "Visok unos proteina"),
+    ("Hipertenzija", "EXACERBATES", "Bubrežna insuficijencija"),
+    ("Bubrežna insuficijencija", "EXACERBATES", "Hipertenzija"),
+    ("Natrijum (unos)", "INFLUENCES", "Krvni pritisak"),
+    ("Non-dipping pritisak", "INDICATES", "Kardiorenalni rizik"),
+    ("Jutarnji BP skok", "INDICATES", "Hormonalna/bubrežna disregulacija"),
+    ("TSH", "INFLUENCES", "Krvni pritisak"),
+    ("TSH", "INFLUENCES", "Lipidni profil"),
+    ("Glukoza", "EXACERBATES", "Bubrežna insuficijencija"),
+    ("Trigliceridi", "INDICATES", "Metabolički sindrom"),
+    ("Gama-GT", "INDICATES", "Jetrena/metabolička disfunkcija"),
+    ("Mokraćna kiselina", "EXACERBATES", "Hipertenzija"),
+    ("Mokraćna kiselina", "EXACERBATES", "Bubrežna insuficijencija"),
+    ("Eritrociti u urinu", "INDICATES", "Urološka/nefrološka patologija"),
+    ("Protein u urinu", "INDICATES", "Bubrežno oštećenje"),
+    ("Gvožđe", "INFLUENCES", "Hemoglobin"),
+    ("Feritin", "INDICATES", "Depoi gvožđa / inflamacija"),
+    ("Nizak Hemoglobin", "EXACERBATES", "Kardiovaskularno opterećenje"),
+    ("CRP", "INDICATES", "Inflamacija"),
+    ("Kreatinin", "INDICATES", "Bubrežna funkcija"),
+    ("Visok unos soli", "EXACERBATES", "Non-dipping pritisak"),
+]
+
+
+def seed_ckg() -> None:
+    if q_one("SELECT 1 FROM ckg_edges LIMIT 1"):
+        return
+    q_execmany("INSERT INTO ckg_edges (src, rel, dst) VALUES (?,?,?)", CKG_SEED)
+
+
+def ckg_context() -> str:
+    """CKG ivice kao tekst — kontekst za konflikt-rezoluciju konzilijuma."""
+    rows = q_all("SELECT src, rel, dst FROM ckg_edges")
+    return "\n".join(f"- [{r['src']}] --{r['rel']}--> [{r['dst']}]" for r in rows)
 
 
 # --------------------------------------------------------------------------- #
@@ -865,33 +1221,290 @@ def generate_daily_report(model_id: str, api_key: str) -> dict:
     return _parse_json(raw)
 
 
+# =========================================================================== #
+#  SLOJ 3+4: MULTI-AGENT KONZILIJUM (nezavisna analiza → protiv-teg filter →
+#  sinteza sa Chain-of-Citation). Svaki agent je vezan za svoje smernice.
+# =========================================================================== #
+AGENT_JSON_SHAPE = """VRATI ISKLJUČIVO validan JSON (bez markdown ograda):
+{
+  "agent": "<tvoje ime>",
+  "risk_score": <0-100, rizik u TVOM domenu za ovog konkretnog pacijenta>,
+  "observations": ["<nalaz kroz tvoju kliničku prizmu>", "..."],
+  "recommendations": [
+    {"text": "<konkretna preporuka>", "category": "ishrana|životni stil|praćenje|lekar",
+     "strength": "jaka|umerena|slaba",
+     "citation": {"guideline": "<smernica i godina, npr. ESC 2024 Arterial Hypertension>",
+                  "section": "<poglavlje/sekcija, npr. §8.2 Dietary sodium>"}}
+  ],
+  "flags": ["<nalaz koji zahteva pažnju drugih specijalista>"]
+}
+PRAVILA: Ostani STRIKTNO u svom domenu. SVAKA preporuka mora imati citation
+(smernica + sekcija) — bez izvora nema preporuke. NE izmišljaj DOI ni autore;
+citiraj samo naziv smernice i sekciju. Sve prilagodi profilu pacijenta
+(godine, BMI, pol). Piši na srpskom."""
+
+AGENTS = {
+    "Kardiolog": {
+        "emoji": "🫀", "guidelines": "ESC (European Society of Cardiology), AHA",
+        "triggers": ["Holesterol", "LDL", "HDL", "Trigliceridi", "CPK", "LDH"],
+        "system": "Ti si Agent KARDIOLOG konzilijuma. Radiš ISKLJUČIVO po ESC i AHA "
+                  "smernicama (arterijska hipertenzija, dislipidemija, KV prevencija). "
+                  "Analiziraš: pritisak (3x dnevno, obrasce jutro/popodne/veče, "
+                  "non-dipping), lipidni panel, CPK, LDH. " + AGENT_JSON_SHAPE},
+    "Urolog": {
+        "emoji": "🚻", "guidelines": "EAU (European Association of Urology)",
+        "triggers": ["Eritrociti u urinu", "Leukociti u urinu", "Protein u urinu", "PSA"],
+        "system": "Ti si Agent UROLOG konzilijuma. Radiš ISKLJUČIVO po EAU smernicama "
+                  "(hematurija, infekcije, prostata). Analiziraš: urinalizu (eritrociti, "
+                  "leukociti, protein, nitriti), PSA. " + AGENT_JSON_SHAPE},
+    "Nefrolog": {
+        "emoji": "🫘", "guidelines": "KDIGO",
+        "triggers": ["Kreatinin", "eGFR", "Mokraćna kiselina", "Kalijum", "Natrijum",
+                     "Hlorid", "Kalcijum", "Magnezijum", "Urea"],
+        "system": "Ti si Agent NEFROLOG konzilijuma. Radiš ISKLJUČIVO po KDIGO "
+                  "smernicama (CKD, elektroliti, renalna hipertenzija). Analiziraš: "
+                  "kreatinin, eGFR (CKD-EPI), mokraćnu kiselinu, elektrolite, dnevne BP "
+                  "trendove. POSEBNO pazi na kalijum i pad eGFR — tvoja mišljenja imaju "
+                  "pravo veta na dijetetske preporuke drugih. " + AGENT_JSON_SHAPE},
+    "Endokrinolog": {
+        "emoji": "🦋", "guidelines": "ATA, ADA",
+        "triggers": ["Glukoza", "HbA1c", "TSH"],
+        "system": "Ti si Agent ENDOKRINOLOG konzilijuma. Radiš ISKLJUČIVO po ATA i ADA "
+                  "smernicama (štitnjača, glikemija, metabolizam). Analiziraš: glukozu "
+                  "natašte, HbA1c, TSH, lipidne frakcije, JUTARNJE BP skokove "
+                  "(kortizol/hormonska komponenta). " + AGENT_JSON_SHAPE},
+    "Hepatolog": {
+        "emoji": "🫓", "guidelines": "EASL",
+        "triggers": ["AST", "ALT", "Gama-GT", "Bilirubin", "ALP", "Trigliceridi"],
+        "system": "Ti si Agent HEPATOLOG konzilijuma. Radiš ISKLJUČIVO po EASL "
+                  "smernicama (jetra, MAFLD). Analiziraš: GOT/AST, GPT/ALT, Gama-GT, "
+                  "bilirubin, ALP, trigliceride, popodnevne (post-prandijalne) BP "
+                  "odgovore. " + AGENT_JSON_SHAPE},
+    "Hematolog": {
+        "emoji": "🩸", "guidelines": "ASH",
+        "triggers": ["Gvožđe", "Feritin", "Vitamin B12", "Folna kiselina",
+                     "Hemoglobin", "Eritrociti u urinu", "Leukociti", "Trombociti"],
+        "system": "Ti si Agent HEMATOLOG konzilijuma. Radiš ISKLJUČIVO po ASH "
+                  "smernicama (anemije, deficiti). Analiziraš: gvožđe, feritin, B12, "
+                  "folnu kiselinu, hemoglobin i krvnu sliku. " + AGENT_JSON_SHAPE},
+}
+
+NUTRI_SYSTEM = """Ti si Agent KLINIČKI NUTRICIONISTA konzilijuma (ESPEN smernice, \
+DASH/Mediteranske studije). Dobijaš RAZREŠENE preporuke svih specijalista (posle \
+protiv-teg filtera) i kompletne podatke pacijenta. Napravi biometrijski optimalan \
+nutritivni plan koji POŠTUJE SVA ograničenja specijalista (naročito nefrološka — \
+kalijum/so/protein) i profil pacijenta (godine, BMI, pol).
+VRATI ISKLJUČIVO validan JSON:
+{
+  "nutrition_plan": [
+    {"text": "<konkretna nutritivna intervencija>", "reason": "<zašto, vezano za nalaze>",
+     "citation": {"guideline": "<npr. ESPEN 2023 / DASH trial>", "section": "<sekcija>"}}
+  ],
+  "avoid": ["<šta izbegavati i zašto ukratko>"],
+  "notes": "<kratka napomena>"
+}
+NE izmišljaj DOI. Piši na srpskom."""
+
+CONFLICT_SYSTEM = """Ti si ORKESTRATOR konzilijuma — protiv-teg filter (Counter-Weight). \
+Dobijaš nezavisne JSON izveštaje specijalista i Klinički graf znanja (CKG). Zadatak: \
+STROGA provera protivrečnosti između preporuka.
+Primer pravila: ako Kardiolog preporuči ishranu bogatu kalijumom, a Nefrolog vidi \
+povišen kalijum ili pad eGFR — kardiološka preporuka se DEPRECIRA ili MODIFIKUJE, \
+uz eksplicitno obrazloženje ("Modifikujem kardiološki protokol X zbog renalnog \
+parametra Y"). Nefrološka bezbednost ima prednost nad optimizacijom.
+VRATI ISKLJUČIVO validan JSON:
+{
+  "resolutions": [
+    {"original": "<originalna preporuka>", "from_agent": "<ko ju je dao>",
+     "action": "zadržano|modifikovano|deprecirano",
+     "modified_to": "<nova verzija ili null>",
+     "reason": "<eksplicitno: Modifikujem/Depreciram X zbog Y>",
+     "due_to_agent": "<čiji nalaz je presudio ili null>"}
+  ],
+  "final_recommendations": [
+    {"text": "<konačna preporuka>", "category": "ishrana|životni stil|praćenje|lekar",
+     "strength": "jaka|umerena|slaba", "from_agent": "<izvor>",
+     "citation": {"guideline": "<smernica>", "section": "<sekcija>"}}
+  ]
+}
+Piši na srpskom."""
+
+SYNTH_SYSTEM = """Ti si PREDSEDAVAJUĆI konzilijuma. Dobijaš: razrešene preporuke \
+(posle protiv-teg filtera), nutritivni plan, rizik-skorove agenata i podatke pacijenta. \
+Sastavi KONAČAN dnevni izveštaj stanja organizma.
+VRATI ISKLJUČIVO validan JSON:
+{
+  "overall": "GREEN" | "YELLOW" | "RED",
+  "score": <0-100 dnevni indeks organizma (uzmi u obzir rizik-skorove svih agenata)>,
+  "headline": "<kratka ocena, do 8 reči>",
+  "summary": "<3-5 rečenica: sinteza svih domena, pomeni ključne trendove>",
+  "insights": [ {"status":"GREEN|YELLOW|RED","title":"<domen: kratko>","message":"<1-2 rečenice>"} ],
+  "focus": ["<konkretna preporuka za DANAS (iz final_recommendations/nutritivnog plana)>"],
+  "citations": [ {"guideline":"<smernica>","section":"<sekcija>","claim":"<na šta se odnosi>"} ],
+  "conflicts": ["<rečenica o svakom razrešenom sukobu, npr. Modifikovan X zbog Y>"]
+}
+SVAKA tvrdnja u focus/insights mora biti pokrivena stavkom u citations (Chain-of-
+Citation). NE izmišljaj DOI. Piši na srpskom."""
+
+
+def clinical_data_bundle() -> str:
+    """Kompletan klinički paket za agente: profil + vremenska linija sa trend
+    velocity analizom + BP obrasci (3x dnevno) + dijagnoze."""
+    ctx = build_health_context()
+    tv = trend_velocity()
+    lines = []
+    for t in sorted(tv, key=lambda x: (not x["adverse_trend"], x["param"])):
+        flag = " ⚠ NEPOVOLJAN TREND" if t["adverse_trend"] else ""
+        rng = "u opsegu" if t["in_range"] else "VAN OPSEGA"
+        lines.append(f"- {t['param']} [LOINC {t['loinc']}]: {t['last_value']} {t['unit']} "
+                     f"({t['last_date']}), {rng}, trend "
+                     f"{t['pct_of_range_per_month']:+.1f}% opsega/mes, n={t['points']}{flag}")
+    bp = bp_pattern_analysis(7)
+    bp_lines = [f"  {p}: {a[0]}/{a[1]} mmHg" if a else f"  {p}: nema merenja"
+                for p, a in bp["averages"].items()]
+    return (f"{ctx}\n\nVREMENSKA LINIJA LAB PARAMETARA (Trend Velocity — ponderisana "
+            f"regresija, skoriji podaci teži):\n" + "\n".join(lines or ["- nema lab podataka"])
+            + f"\n\nKRVNI PRITISAK — PROSECI PO DOBU DANA (poslednjih {bp['days']} dana, "
+            f"{bp['readings']} merenja):\n" + "\n".join(bp_lines)
+            + ("\nDETEKTOVANI OBRASCI:\n" + "\n".join(f"  ⚠ {p}" for p in bp["patterns"])
+               if bp["patterns"] else "\n(bez detektovanih BP obrazaca)"))
+
+
+def _agent_call(client, model_id: str, system: str, user_msg: str,
+                max_tokens: int = 1600) -> dict:
+    with client.messages.stream(
+        model=model_id, max_tokens=max_tokens, system=system,
+        messages=[{"role": "user", "content": user_msg}],
+    ) as stream:
+        resp = stream.get_final_message()
+    return _parse_json("".join(b.text for b in resp.content if b.type == "text"))
+
+
+def run_consortium(model_id: str, api_key: str, status=None) -> dict:
+    """Hijerarhijski konsenzus: 1) nezavisne analize po domenu → 2) protiv-teg
+    filter (rešavanje sukoba uz CKG) → 3) nutricionista → 4) sinteza sa citatima."""
+    client = _make_client(api_key)
+    bundle = clinical_data_bundle()
+    bp = bp_pattern_analysis(7)
+    present = {t["param"] for t in trend_velocity()}
+
+    # Koji agenti se aktiviraju (imaju svoje podatke ili BP cross-talk okidač)
+    triggered = [n for n, a in AGENTS.items()
+                 if (present & set(a["triggers"])) or (n in bp["triggers"])]
+    if not triggered:
+        triggered = ["Kardiolog"]
+
+    # Korak 1 — nezavisna analiza po domenu
+    sub_reports = {}
+    for name in triggered:
+        if status:
+            status.update(label=f"{AGENTS[name]['emoji']} Agent {name} analizira "
+                                f"({AGENTS[name]['guidelines']})…")
+        try:
+            sub_reports[name] = _agent_call(
+                client, model_id, AGENTS[name]["system"],
+                f"PODACI PACIJENTA:\n{bundle}\n\nDaj svoj izolovani sub-report kao JSON.")
+        except Exception as e:  # noqa: BLE001
+            sub_reports[name] = {"agent": name, "error": str(e)[:200],
+                                 "observations": [], "recommendations": [], "flags": []}
+
+    # Korak 2 — protiv-teg filter (konflikt-rezolucija uz CKG)
+    if status:
+        status.update(label="⚖️ Protiv-teg filter: provera protivrečnosti…")
+    conflict_input = (f"KLINIČKI GRAF ZNANJA (CKG):\n{ckg_context()}\n\n"
+                      f"SUB-REPORTI SPECIJALISTA:\n"
+                      f"{json.dumps(sub_reports, ensure_ascii=False)}\n\n"
+                      f"Razreši protivrečnosti i vrati JSON.")
+    try:
+        resolution = _agent_call(client, model_id, CONFLICT_SYSTEM, conflict_input, 2500)
+    except Exception:  # noqa: BLE001
+        resolution = {"resolutions": [], "final_recommendations": []}
+
+    # Korak 2.5 — klinički nutricionista (sintetiše razrešene preporuke)
+    if status:
+        status.update(label="🥗 Agent Nutricionista pravi biometrijski plan (ESPEN)…")
+    try:
+        nutrition = _agent_call(
+            client, model_id, NUTRI_SYSTEM,
+            f"PODACI PACIJENTA:\n{bundle}\n\nRAZREŠENE PREPORUKE KONZILIJUMA:\n"
+            f"{json.dumps(resolution.get('final_recommendations', []), ensure_ascii=False)}"
+            f"\n\nNapravi nutritivni plan kao JSON.")
+    except Exception:  # noqa: BLE001
+        nutrition = {"nutrition_plan": [], "avoid": [], "notes": ""}
+
+    # Korak 3 — sinteza (Chain-of-Citation)
+    if status:
+        status.update(label="🧬 Predsedavajući sastavlja konačan izveštaj…")
+    synth_input = (
+        f"PODACI PACIJENTA:\n{bundle}\n\n"
+        f"RIZIK-SKOROVI: " + ", ".join(
+            f"{n}={r.get('risk_score', '—')}" for n, r in sub_reports.items()) + "\n\n"
+        f"RAZREŠENE PREPORUKE:\n{json.dumps(resolution, ensure_ascii=False)}\n\n"
+        f"NUTRITIVNI PLAN:\n{json.dumps(nutrition, ensure_ascii=False)}\n\n"
+        f"Datum: {date.today():%d.%m.%Y}. Sastavi konačan izveštaj kao JSON.")
+    final = _agent_call(client, model_id, SYNTH_SYSTEM, synth_input, 2500)
+
+    # Sačuvaj kompletan zapisnik konzilijuma
+    detail = {"sub_reports": sub_reports, "resolution": resolution,
+              "nutrition": nutrition, "triggered": triggered,
+              "bp_patterns": bp["patterns"]}
+    q_exec("""INSERT INTO consortium_reports (id, generated_at, signature, content)
+              VALUES (1, ?, ?, ?)
+              ON CONFLICT (id) DO UPDATE SET generated_at=excluded.generated_at,
+                signature=excluded.signature, content=excluded.content""",
+           (datetime.now().isoformat(), data_signature(),
+            json.dumps(detail, ensure_ascii=False)))
+    return final
+
+
+def get_consortium_detail():
+    row = q_one("SELECT * FROM consortium_reports WHERE id = 1")
+    if not row:
+        return None
+    try:
+        return json.loads(row["content"])
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def ensure_daily_report(force: bool = False):
-    """Pri pokretanju: ako ima novih unosa/dokumenata ili je novi dan, regeneriše
-    dnevno stanje organizma; inače vraća keširano. Ne troši API bez potrebe."""
+    """Pri pokretanju: ako ima novih unosa/dokumenata ili je novi dan, SAZIVA
+    KONZILIJUM (multi-agent konsenzus); inače vraća keširan izveštaj.
+    Red Flags (tvrda brava) potpuno preskaču AI."""
     if not api_ready:
         return None
+    if st.session_state.get("red_flags"):
+        return None  # kritično stanje — saveti blokirani, AI se ne poziva
     sig = data_signature()
     today = date.today().isoformat()
     rep = get_daily_report()
     stale = force or (rep is None) or (rep["report_date"] != today) or (rep["signature"] != sig)
     if stale:
-        with st.spinner("🧬 AI procenjuje dnevno stanje organizma…"):
-            try:
-                data = generate_daily_report(model_id, api_key)
-            except Exception as e:  # noqa: BLE001
-                em = str(e).lower()
-                if "credit balance" in em or "billing" in em or "quota" in em:
-                    st.warning("💳 Anthropic nalog nema kredita — dopuni na "
-                               "console.anthropic.com → Plans & Billing da bi AI procene radile "
-                               "(dnevno stanje, Smart Camera, čitanje nalaza).")
-                else:
+        try:
+            with st.status("🧠 Konzilijum zaseda — analiza novih podataka…",
+                           expanded=False) as status:
+                data = run_consortium(model_id, api_key, status)
+                status.update(label="✅ Konzilijum završio konsenzus.", state="complete")
+        except Exception as e:  # noqa: BLE001
+            em = str(e).lower()
+            if "credit balance" in em or "billing" in em or "quota" in em:
+                st.warning("💳 Anthropic nalog nema kredita — dopuni na "
+                           "console.anthropic.com → Plans & Billing.")
+            else:
+                # Rezerva: stari brzi mozak, da Dashboard ne ostane prazan
+                try:
+                    data = generate_daily_report(model_id, api_key)
+                    save_daily_report(today, sig, json.dumps(data, ensure_ascii=False))
+                    st.caption(f"Konzilijum nedostupan ({str(e)[:120]}) — prikazana brza procena.")
+                    return data
+                except Exception:  # noqa: BLE001
                     st.warning(f"Ne mogu sada da generišem dnevno stanje: {e}")
-                if rep:
-                    try:
-                        return json.loads(rep["content"])
-                    except Exception:  # noqa: BLE001
-                        return None
-                return None
+            if rep:
+                try:
+                    return json.loads(rep["content"])
+                except Exception:  # noqa: BLE001
+                    return None
+            return None
         save_daily_report(today, sig, json.dumps(data, ensure_ascii=False))
         return data
     try:
@@ -1058,6 +1671,7 @@ def smart_analyze(media_block: dict, ocr_text: str, model_id: str, api_key: str)
 #  Inicijalizacija stanja
 # --------------------------------------------------------------------------- #
 init_db()
+seed_ckg()
 if "theme" not in st.session_state:
     st.session_state["theme"] = "light"
 if "view" not in st.session_state:
@@ -1068,6 +1682,9 @@ require_login()
 # Auto-seed na praznoj bazi (samo prvi put)
 if latest_vitals() is None and not q_one("SELECT 1 FROM lab_results LIMIT 1"):
     seed_demo_data()
+
+# KLINIČKA TRIJAŽA (Red Flags) — tvrda brava izvan LLM-a, na svako pokretanje
+st.session_state["red_flags"] = check_red_flags()
 
 
 # --------------------------------------------------------------------------- #
@@ -1221,8 +1838,15 @@ def render_dashboard():
 
     st.write("")
 
-    # --- Dnevno stanje organizma (auto: regeneriše se na nove unose / novi dan) ---
-    report = ensure_daily_report(force=st.session_state.pop("force_daily", False))
+    # --- RED FLAGS: dominantan kritičан ekran, blokira sve AI savete ---
+    red_flags = st.session_state.get("red_flags") or []
+    if red_flags:
+        render_red_flag_screen(red_flags)
+        st.write("")
+
+    # --- Dnevno stanje organizma (KONZILIJUM: regeneriše se na nove unose / novi dan) ---
+    report = None if red_flags else ensure_daily_report(
+        force=st.session_state.pop("force_daily", False))
     if report:
         dcol = VERDICT.get(str(report.get("overall", "YELLOW")).upper(), VERDICT["YELLOW"])
         score = report.get("score", "—")
@@ -1246,7 +1870,59 @@ def render_dashboard():
           {("<b style='font-size:.85rem'>Fokus danas:</b><ul style='margin:6px 0 0;padding-left:18px'>" + focus_html + "</ul>") if focus else ""}
         </div>
         """, unsafe_allow_html=True)
-        if st.button("🔄 Osveži dnevno stanje", key="refresh_daily"):
+
+        # Protiv-teg filter: eksplicitno prikaži razrešene sukobe
+        conflicts = report.get("conflicts") or []
+        for c in conflicts:
+            st.markdown(
+                f"<div class='mt-guard' style='border-color:{VERDICT['YELLOW']};"
+                f"background:{VERDICT['YELLOW']}1A'>⚖️ <b>Protiv-teg filter:</b> {c}</div>",
+                unsafe_allow_html=True)
+
+        # Zapisnik konzilijuma: sub-reporti, rezolucije, nutritivni plan, citati
+        detail = get_consortium_detail()
+        if detail:
+            with st.expander("🧠 Zapisnik konzilijuma — mišljenja specijalista"):
+                for name in detail.get("triggered", []):
+                    sr = (detail.get("sub_reports") or {}).get(name) or {}
+                    em = AGENTS.get(name, {}).get("emoji", "🩺")
+                    gl = AGENTS.get(name, {}).get("guidelines", "")
+                    risk = sr.get("risk_score", "—")
+                    st.markdown(f"**{em} {name}** ({gl}) — rizik u domenu: **{risk}/100**")
+                    for o in (sr.get("observations") or [])[:4]:
+                        st.markdown(f"- {o}")
+                    if sr.get("error"):
+                        st.caption(f"⚠ Agent nije završio: {sr['error']}")
+                    st.write("")
+                res = (detail.get("resolution") or {}).get("resolutions") or []
+                changed = [r for r in res if r.get("action") in ("modifikovano", "deprecirano")]
+                if changed:
+                    st.markdown("**⚖️ Razrešeni sukobi (protiv-teg):**")
+                    for r in changed:
+                        st.markdown(f"- **{r.get('action', '').upper()}** "
+                                    f"[{r.get('from_agent', '')}] „{r.get('original', '')}“ → "
+                                    f"{r.get('reason', '')}")
+                nut = detail.get("nutrition") or {}
+                if nut.get("nutrition_plan"):
+                    st.markdown("**🥗 Nutritivni plan (ESPEN/DASH):**")
+                    for item in nut["nutrition_plan"][:6]:
+                        cit = item.get("citation") or {}
+                        st.markdown(f"- {item.get('text', '')} "
+                                    f"<span class='mt-muted'>[{cit.get('guideline', '')} "
+                                    f"{cit.get('section', '')}]</span>", unsafe_allow_html=True)
+                if nut.get("avoid"):
+                    st.markdown("**⛔ Izbegavati:** " + " · ".join(nut["avoid"][:6]))
+
+        # Chain-of-Citation: izvori za sve tvrdnje
+        cits = report.get("citations") or []
+        if cits:
+            with st.expander(f"📚 Izvori — Chain-of-Citation ({len(cits)})"):
+                for c in cits:
+                    st.markdown(f"- **{c.get('guideline', '')}**, {c.get('section', '')} — "
+                                f"<span class='mt-muted'>{c.get('claim', '')}</span>",
+                                unsafe_allow_html=True)
+
+        if st.button("🔄 Sazovi konzilijum ponovo", key="refresh_daily"):
             st.session_state["force_daily"] = True
             st.rerun()
         st.session_state["daily_insights"] = report.get("insights") or []
@@ -1387,6 +2063,11 @@ def _handle_scan_result(res: dict) -> bool:
         st.success(f"🩺 Prepoznato: merenje sa uređaja · pouzdanost {conf}.")
         _transfer_vitals_to_entry(res["vitals"])
     elif dt == "food_product" and res.get("food"):
+        if st.session_state.get("red_flags"):
+            # Tvrda brava: kod kritičnog stanja nutritivni saveti su obustavljeni
+            st.error("⛔ Kritično stanje detektovano (Red Flag) — nutritivni saveti su "
+                     "obustavljeni dok se vrednosti ne normalizuju. Javi se lekaru.")
+            return False
         st.success(f"🍎 Prepoznato: prehrambeni proizvod · pouzdanost {conf}.")
         _show_food_result(res["food"])
     elif dt == "medical_document" and res.get("document"):
