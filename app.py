@@ -396,6 +396,10 @@ def init_db() -> None:
         f"""CREATE TABLE IF NOT EXISTS scanned_products_log (
             id {pk}, product_name TEXT NOT NULL, ingredients_text TEXT,
             ai_verdict TEXT NOT NULL, analysis_reason TEXT, timestamp TEXT NOT NULL)""",
+        f"""CREATE TABLE IF NOT EXISTS medications (
+            id {pk}, medication_name TEXT NOT NULL, active_substance TEXT,
+            dosage_text TEXT, form TEXT, purpose TEXT,
+            status TEXT NOT NULL DEFAULT 'active', source TEXT, added_at TEXT NOT NULL)""",
         f"""CREATE TABLE IF NOT EXISTS user_profile (
             id INTEGER PRIMARY KEY, age INTEGER, height_cm INTEGER,
             weight_kg {real}, sex TEXT, updated_at TEXT)""",
@@ -453,6 +457,24 @@ def active_diagnoses():
     return q_all(
         "SELECT * FROM medical_history WHERE status='active' ORDER BY date_diagnosed DESC"
     )
+
+
+def active_medications():
+    return q_all(
+        "SELECT * FROM medications WHERE status='active' ORDER BY added_at DESC"
+    )
+
+
+def add_medication(name, substance, dosage, form, purpose, source="scan") -> None:
+    q_exec(
+        """INSERT INTO medications (medication_name, active_substance, dosage_text,
+           form, purpose, status, source, added_at) VALUES (?,?,?,?,?,'active',?,?)""",
+        (name, substance, dosage, form, purpose, source, datetime.now().isoformat()),
+    )
+
+
+def stop_medication(med_id: int) -> None:
+    q_exec("UPDATE medications SET status='stopped' WHERE id = ?", (med_id,))
 
 
 def latest_labs():
@@ -518,9 +540,10 @@ def data_signature() -> str:
     l = q_one("SELECT COUNT(*) c, MAX(test_date) m FROM lab_results")
     d = q_one("SELECT COUNT(*) c, MAX(date_diagnosed) m FROM medical_history")
     s = q_one("SELECT COUNT(*) c, MAX(timestamp) m FROM scanned_products_log")
+    m = q_one("SELECT COUNT(*) c, MAX(added_at) m FROM medications WHERE status='active'")
     p = get_profile()
     raw = (f"{v['c']}|{v['m']}|{l['c']}|{l['m']}|{d['c']}|{d['m']}|"
-           f"{s['c']}|{s['m']}|{p['updated_at'] if p else '-'}")
+           f"{s['c']}|{s['m']}|{m['c']}|{m['m']}|{p['updated_at'] if p else '-'}")
     return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
 
@@ -1031,6 +1054,7 @@ def build_health_context() -> str:
     v = latest_vitals()
     dx = active_diagnoses()
     labs = latest_labs()
+    meds = active_medications()
 
     if p and (p["age"] or p["height_cm"] or p["weight_kg"]):
         bmi, cat = compute_bmi(p["height_cm"], p["weight_kg"])
@@ -1055,15 +1079,27 @@ def build_health_context() -> str:
         or "nema lab nalaza"
     )
     hr = v["heart_rate"] if v else "—"
+    meds_list = (
+        "; ".join(
+            f"{m['medication_name']}"
+            + (f" ({m['active_substance']})" if m["active_substance"] else "")
+            + (f", {m['dosage_text']}" if m["dosage_text"] else "")
+            for m in meds
+        )
+        or "nema unetih lekova"
+    )
     return (
         f"LIČNI PROFIL (OBAVEZNO uzeti u obzir za SVAKI savet, dozu, normu i procenu): {prof}\n"
         f"KRVNI PRITISAK (poslednji): {bp}\n"
         f"PULS U MIROVANJU: {hr} bpm\n"
         f"AKTIVNE DIJAGNOZE: {dx_list}\n"
         f"LABORATORIJSKI NALAZI (poslednji): {lab_list}\n"
+        f"LEKOVI KOJE KORISNIK TRENUTNO KORISTI: {meds_list}\n"
         f"PRAVILO: Svaku procenu, preporuku i pretragu prilagodi OVOM osobi — "
         f"njenim godinama, telesnoj masi (BMI) i polu. Norme i porcije računaj po "
-        f"kg telesne mase gde je relevantno. Ne daj generičke savete."
+        f"kg telesne mase gde je relevantno. Ne daj generičke savete. UVEK proveri "
+        f"moguću interakciju predloga (hrana/suplement/savet) sa lekovima koje "
+        f"korisnik već koristi i eksplicitno je pomeni ako postoji."
     )
 
 
@@ -1567,13 +1603,15 @@ Tipovi (doc_type):
   PAMETNOG SATA (puls, stres, san). Ima brojeve merenja, često i vreme (npr. 14:14).
 - "food_product" — DEKLARACIJA HRANE (nutritivna tablica, sastojci, energetska vrednost).
 - "medical_document" — LABORATORIJSKI NALAZ, lekarski izveštaj, otpusna lista, CT/MR.
+- "medication" — PAKOVANJE LEKA, BLISTER, KUTIJA ili UPUTSTVO ZA LEK (naziv leka,
+  aktivna supstanca, jačina/doza, farmaceutski oblik).
 - "unknown" — ako se ne može pouzdano svrstati.
 
 Popuni SAMO objekat koji odgovara prepoznatom tipu; ostale stavi na null.
 
 VRATI ISKLJUČIVO validan JSON (bez markdown ograda):
 {
-  "doc_type": "vitals_device" | "food_product" | "medical_document" | "unknown",
+  "doc_type": "vitals_device" | "food_product" | "medical_document" | "medication" | "unknown",
   "confidence": "niska" | "srednja" | "visoka",
   "reason": "<kratko zašto si tako klasifikovao>",
   "vitals": {
@@ -1598,6 +1636,14 @@ VRATI ISKLJUČIVO validan JSON (bez markdown ograda):
     "lab_results": [ {"parameter_name":"<...>","value":<broj>,"unit":"<...>","reference_range":"<... ili prazno>"} ],
     "diagnoses": ["<dijagnoza>"], "summary": "<2-3 rečenice>"
   } | null,
+  "medication": {
+    "medication_name": "<komercijalni naziv leka>",
+    "active_substance": "<aktivna supstanca (INN naziv) ili null>",
+    "dosage_text": "<jačina/doza, npr. '20 mg' ili '50mg/5ml', ili null>",
+    "form": "<tableta|kapsula|sirup|injekcija|mast|kapi|ostalo>",
+    "purpose": "<terapijska grupa/namena ako je vidljiva na pakovanju, inače null>",
+    "notes": "<kratko šta si pročitao>"
+  } | null,
   "notes": "<poruka korisniku na srpskom>"
 }
 
@@ -1610,6 +1656,8 @@ PRAVILA za vitals (KRITIČNO za tačnost sa LCD/sedam-segmentnih ekrana):
   reading_time i NIJE merenje. Sate sna pretvori u minute.
 PRAVILA za food: NE generička recenzija — ukrsti sa korisnikovim pritiskom, dijagnozama \
 i lab nalazima (visok natrijum + povišen pritisak → RED/YELLOW, itd.).
+PRAVILA za medication: Čitaj TAČNO naziv i jačinu sa kutije/blistera/uputstva —
+ne pogađaj. Ako aktivna supstanca nije eksplicitno napisana, ostavi null (ne izmišljaj).
 Sav opisni tekst na srpskom."""
 
 
@@ -2044,6 +2092,31 @@ def render_dashboard():
 
     st.write("")
 
+    # --- Lekovi koje koristim (sažeto — unos ide preko Smart Camere; analiza/
+    # korelacija sa zdravstvenim stanjem radi se ispod haube, kroz zajednički
+    # kontekst koji čita ceo mozak — bez posebnog dugmeta za analizu) ---
+    meds = active_medications()
+    with st.expander(f"💊 Lekovi koje koristim ({len(meds)})"):
+        if meds:
+            for med in meds:
+                dose = f" · {med['dosage_text']}" if med["dosage_text"] else ""
+                sub = f" ({med['active_substance']})" if med["active_substance"] else ""
+                mcol1, mcol2 = st.columns([5, 1])
+                with mcol1:
+                    st.markdown(f"**{med['medication_name']}**{sub}{dose}")
+                    if med["purpose"]:
+                        st.caption(med["purpose"])
+                with mcol2:
+                    if st.button("🗑️", key=f"stop_med_{med['id']}"):
+                        stop_medication(med["id"])
+                        st.rerun()
+        else:
+            st.caption("Nema unetih lekova.")
+        st.caption("📷 Skeniraj kutiju/uputstvo leka preko Smart Camere da ga dodaš — "
+                   "aplikacija ga automatski uzima u obzir u svim procenama.")
+
+    st.write("")
+
     # --- AI Health Guard ---
     st.markdown("### ✨ AI Health Guard")
     insights = st.session_state.get("daily_insights", [])
@@ -2080,6 +2153,9 @@ def _handle_scan_result(res: dict) -> bool:
     elif dt == "medical_document" and res.get("document"):
         st.success(f"📄 Prepoznato: medicinski dokument · pouzdanost {conf}.")
         _store_and_show_doc(res["document"])
+    elif dt == "medication" and res.get("medication"):
+        st.success(f"💊 Prepoznat lek · pouzdanost {conf}.")
+        _store_and_show_medication(res["medication"])
     else:
         st.warning("Nisam uspeo pouzdano da prepoznam sliku. "
                    f"{res.get('notes') or ''} Probaj jasniju/bližu fotografiju.")
@@ -2087,11 +2163,31 @@ def _handle_scan_result(res: dict) -> bool:
     return True
 
 
+def _store_and_show_medication(med: dict):
+    """Auto-čuvanje leka prepoznatog sa pakovanja/uputstva + prikaz sažetka.
+    Korelacija sa zdravstvenim stanjem se NE radi ovde posebno — lek ulazi u
+    zajednički kontekst (build_health_context) koji već čita ceo mozak
+    (konzilijum, food verdict, dnevno stanje) — „ispod haube", bez posebnog koraka."""
+    name = med.get("medication_name") or "Nepoznat lek"
+    add_medication(
+        name, med.get("active_substance"), med.get("dosage_text"),
+        med.get("form"), med.get("purpose"), source="scan",
+    )
+    dose = f" · {med['dosage_text']}" if med.get("dosage_text") else ""
+    sub = f" ({med['active_substance']})" if med.get("active_substance") else ""
+    st.markdown(
+        f"<div class='mt-card'><b>💊 {name}</b>{sub}{dose}<br>"
+        f"<span class='mt-muted'>{med.get('notes','')}</span></div>",
+        unsafe_allow_html=True)
+    st.success("Sačuvano u sekciju Lekovi koje koristim — od sada se automatski "
+               "uzima u obzir u svim procenama (konzilijum, ocena hrane, dnevno stanje).")
+
+
 def render_camera():
     st.markdown("## 📷 Smart Camera")
-    st.caption("Slikaj ili otpremi bilo šta — merač pritiska, deklaraciju hrane ili "
-               "medicinski nalaz. Mozak sam prepozna tip i smesti na pravo mesto. "
-               "Iz galerije možeš odabrati i **više slika odjednom** (5+).")
+    st.caption("Slikaj ili otpremi bilo šta — merač pritiska, deklaraciju hrane, "
+               "medicinski nalaz ili pakovanje leka. Mozak sam prepozna tip i smesti "
+               "na pravo mesto. Iz galerije možeš odabrati i **više slika odjednom** (5+).")
 
     src = st.radio("Izvor slike",
                    ["📁 Otpremi iz galerije (više slika)", "📸 Kamera"], horizontal=True)
