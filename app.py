@@ -2359,11 +2359,16 @@ def render_camera():
                "na pravo mesto. Iz galerije možeš odabrati i **više slika odjednom** (5+).")
 
     src = st.radio("Izvor slike",
-                   ["📁 Otpremi iz galerije (više slika)", "📸 Kamera"], horizontal=True)
+                   ["📸 Kamera", "📁 Otpremi iz galerije (više slika)"], horizontal=True)
     if src.startswith("📸"):
+        st.caption("Za NOVU fotografiju — kamera se otvara unutar same aplikacije "
+                   "(najpouzdanije). Dozvoli pristup kameri, uslikaj, pa klikni „Analiziraj”.")
         one = st.camera_input("Slikaj")
         images = [one] if one else []
     else:
+        st.caption("Za slike koje su VEĆ u galeriji. Ako preko ovog puta biraš "
+                   "sistemsku „Fotografija” (da uslikaš novo), na nekim telefonima "
+                   "snimak se ne prosledi nazad — u tom slučaju koristi „📸 Kamera” iznad.")
         images = st.file_uploader(
             "Otpremi slike ili PDF — možeš izabrati 5 i više odjednom",
             type=["png", "jpg", "jpeg", "webp", "pdf"], accept_multiple_files=True) or []
@@ -2379,6 +2384,7 @@ def render_camera():
                f"{'datoteka' if len(images) != 1 else 'datoteka'}.")
     if st.button(f"🔍 Analiziraj ({len(images)})", type="primary", use_container_width=True):
         ok = 0
+        auth_failed = False
         for i, img_file in enumerate(images, 1):
             if len(images) > 1:
                 st.markdown(f"#### 🖼️ Prilog {i} / {len(images)}")
@@ -2392,13 +2398,32 @@ def render_camera():
                 if _handle_scan_result(res):
                     ok += 1
             except Exception as e:  # noqa: BLE001
-                st.error(f"Greška na prilogu {i}: {e}")
+                em = str(e).lower()
+                if "401" in em or "authentication" in em or "invalid x-api-key" in em:
+                    auth_failed = True
+                    break
+                if "credit balance" in em or "billing" in em or "quota" in em:
+                    st.error("💳 Anthropic nalog nema kredita — dopuni na "
+                             "console.anthropic.com → Plans & Billing.")
+                else:
+                    st.error(f"Greška na prilogu {i}: {e}")
             if len(images) > 1:
                 st.divider()
-        st.success(f"✅ Obrađeno {ok} / {len(images)} datoteka.")
-        if st.session_state.pop("go_to_entry", False):
-            st.session_state["view"] = "Unos podataka"
-            st.rerun()
+        if auth_failed:
+            st.error("❌ **API ključ nije važeći (greška 401).**\n\n"
+                     "Slika JESTE stigla do aplikacije i pročitana je — ali ju je "
+                     "Claude odbio jer ANTHROPIC_API_KEY nije ispravan. Nije problem "
+                     "do kamere.\n\n"
+                     "Rešenje: generiši nov ključ na **console.anthropic.com → API "
+                     "Keys**, pa ga zameni na telefonu u **Streamlit Cloud → App → "
+                     "Settings → Secrets** (`ANTHROPIC_API_KEY`).")
+        elif ok:
+            st.success(f"✅ Obrađeno {ok} / {len(images)} datoteka.")
+            if st.session_state.pop("go_to_entry", False):
+                st.session_state["view"] = "Unos podataka"
+                st.rerun()
+        else:
+            st.warning("Nijedan prilog nije obrađen — vidi poruke iznad.")
 
 
 def _transfer_vitals_to_entry(vit: dict):
