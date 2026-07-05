@@ -1807,6 +1807,8 @@ PRAVILA za vitals (KRITIČNO za tačnost sa LCD/sedam-segmentnih ekrana):
   skoro uvek 100-180, DIA 60-110, PULS 45-100 — koristi to za proveru logike.
 - IGNORIŠI: M1/M2 (memorija), mmHg, 1/min, bpm, brend. Vreme (npr. 17:24) ide u
   reading_time i NIJE merenje. Sate sna pretvori u minute.
+- Ako se na ekranu vide DATUM i/ili VREME merenja, OBAVEZNO ih pročitaj u
+  reading_date (YYYY-MM-DD) i reading_time (HH:MM) — to je zvanično vreme merenja.
 PRAVILA za food: NE generička recenzija — ukrsti sa korisnikovim pritiskom, dijagnozama \
 i lab nalazima (visok natrijum + povišen pritisak → RED/YELLOW, itd.).
 PRAVILA za medication: Čitaj TAČNO naziv i jačinu sa kutije/blistera/uputstva —
@@ -2426,13 +2428,36 @@ def render_camera():
             st.warning("Nijedan prilog nije obrađen — vidi poruke iznad.")
 
 
+def _device_reading_dt(vit: dict) -> tuple[datetime, bool]:
+    """Datum i vreme SA DISPLEJA merača (korisnik drži sat na meraču tačno
+    podešen, pa je to zvanično vreme merenja). Vraća (datetime, procitano_sa_displeja).
+    Ako uređaj ne prikazuje datum ili vreme (ili se ne mogu pročitati), za taj
+    deo se koristi trenutni trenutak kao rezerva."""
+    now = datetime.now().replace(second=0, microsecond=0)
+    d, t, from_dev = now.date(), now.time(), False
+    rd = str(vit.get("reading_date") or "").strip()
+    rt = str(vit.get("reading_time") or "").strip()
+    for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%d.%m.%y", "%d/%m/%Y", "%m/%d/%Y", "%d-%m-%Y"):
+        try:
+            d = datetime.strptime(rd, fmt).date(); from_dev = True; break
+        except ValueError:
+            continue
+    rt_norm = rt.replace(".", ":").replace("h", ":").strip(": ")
+    for fmt in ("%H:%M", "%H:%M:%S", "%I:%M %p"):
+        try:
+            t = datetime.strptime(rt_norm, fmt).time().replace(second=0, microsecond=0)
+            from_dev = True; break
+        except ValueError:
+            continue
+    return datetime.combine(d, t), from_dev
+
+
 def _transfer_vitals_to_entry(vit: dict):
-    """Prebacuje pročitana merenja (pritisak/puls...) u formu „Unos podataka"
-    na proveru i čuvanje — umesto tihog upisa u bazu.
-    Datum/vreme unosa je UVEK stvarni trenutak skeniranja (aplikacija ga sama
-    generiše), a ne vreme pročitano sa ekrana uređaja — sat na meraču/satu
-    često nije tačno podešen, dok je vreme skeniranja pouzdano i precizno."""
-    rdt = datetime.now().replace(second=0, microsecond=0)
+    """Prebacuje pročitana merenja (pritisak/puls...) + datum i vreme SA DISPLEJA
+    merača u formu „Unos podataka" na proveru i čuvanje (ne tihi upis u bazu).
+    Korisnik drži sat na meraču tačno podešen, pa je vreme sa ekrana verodostojno;
+    ako ga uređaj ne prikazuje, koristi se trenutak skeniranja kao rezerva."""
+    rdt, from_dev = _device_reading_dt(vit)
     vals = {
         "ev_sys": _iv(vit, "blood_pressure_sys"),
         "ev_dia": _iv(vit, "blood_pressure_dia"),
@@ -2456,12 +2481,15 @@ def _transfer_vitals_to_entry(vit: dict):
         parts.append(f"Pritisak <b>{vals['ev_sys']}/{vals['ev_dia']}</b> mmHg")
     if vals["ev_hr"]:
         parts.append(f"Puls <b>{vals['ev_hr']}</b> bpm")
+    time_note = ("vreme sa displeja merača" if from_dev
+                 else "merač nije pokazao vreme — upisan trenutak skeniranja")
     st.markdown(
-        f"<div class='mt-card'><b>📟 {dev}</b> · "
-        f"<span class='mt-muted'>{rdt:%Y-%m-%d %H:%M}</span><br>"
+        f"<div class='mt-card'><b>📟 {dev}</b><br>"
+        f"<span class='mt-muted'>🕒 {rdt:%Y-%m-%d %H:%M} · {time_note}</span><br>"
         f"{' · '.join(parts) or 'nije pročitano nijedno merenje'}</div>",
         unsafe_allow_html=True)
-    st.info("➡️ Vrednosti su prebačene u „Unos podataka“ — proveri i klikni Sačuvaj.")
+    st.info("➡️ Vrednosti (i vreme sa merača) su prebačene u „Unos podataka“ — "
+            "proveri i klikni Sačuvaj.")
 
 
 def _store_and_show_doc(doc: dict):
