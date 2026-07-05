@@ -2435,7 +2435,7 @@ def render_camera():
                    ["📸 Kamera", "📁 Otpremi iz galerije (više slika)"], horizontal=True)
     if src.startswith("📸"):
         st.caption("Za NOVU fotografiju — kamera se otvara unutar same aplikacije "
-                   "(najpouzdanije). Dozvoli pristup kameri, uslikaj, pa klikni „Analiziraj”.")
+                   "(najpouzdanije). Dozvoli pristup kameri, uslikaj, pa klikni „Sačuvaj”.")
         one = st.camera_input("Slikaj")
         images = [one] if one else []
     else:
@@ -2453,9 +2453,9 @@ def render_camera():
         st.caption("Izaberi jednu ili više datoteka iz galerije (ili prebaci na Kamera).")
         return
 
-    st.caption(f"Spremno za analizu: **{len(images)}** "
-               f"{'datoteka' if len(images) != 1 else 'datoteka'}.")
-    if st.button(f"🔍 Analiziraj ({len(images)})", type="primary", use_container_width=True):
+    st.caption(f"Spremno za čuvanje: **{len(images)}** datoteka. "
+               "Nakon čuvanja mozak odmah obrađuje dokument i ugrađuje rezultat u aplikaciju.")
+    if st.button(f"💾 Sačuvaj ({len(images)})", type="primary", use_container_width=True):
         ok = 0
         auth_failed = False
         for i, img_file in enumerate(images, 1):
@@ -2466,7 +2466,7 @@ def render_camera():
                 if ocr_text:
                     with st.expander("📝 Pomoćni OCR tekst (Google Vision)"):
                         st.text(ocr_text)
-                with st.spinner(f"Mozak čita prilog i obrađuje… ({i})"):
+                with st.spinner(f"Čuvam i mozak obrađuje dokument… ({i})"):
                     res = smart_analyze(block, ocr_text, model_id, api_key)
                 if _handle_scan_result(res):
                     ok += 1
@@ -2491,7 +2491,8 @@ def render_camera():
                      "Keys**, pa ga zameni na telefonu u **Streamlit Cloud → App → "
                      "Settings → Secrets** (`ANTHROPIC_API_KEY`).")
         elif ok:
-            st.success(f"✅ Obrađeno {ok} / {len(images)} datoteka.")
+            st.success(f"✅ Sačuvano i obrađeno {ok} / {len(images)} — "
+                       "rezultat je ugrađen u aplikaciju.")
             if st.session_state.pop("go_to_entry", False):
                 st.session_state["view"] = "Unos podataka"
                 st.rerun()
