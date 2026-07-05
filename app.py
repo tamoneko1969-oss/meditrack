@@ -387,6 +387,8 @@ def init_db() -> None:
             id INTEGER PRIMARY KEY, generated_at TEXT, signature TEXT, content TEXT)""",
         f"""CREATE TABLE IF NOT EXISTS ckg_edges (
             id {pk}, src TEXT, rel TEXT, dst TEXT)""",
+        """CREATE TABLE IF NOT EXISTS supplement_plans (
+            id INTEGER PRIMARY KEY, generated_at TEXT, signature TEXT, content TEXT)""",
     ]
     conn = get_conn()
     try:
@@ -605,6 +607,10 @@ LOINC_MAP = {
     "Folna kiselina": {"loinc": "2284-8", "unit": "µg/L", "bad": "down",
                     "syn": ["folna", "folsäure", "folsaure", "folat", "folate"],
                     "ref": (3.9, 26.8)},
+    "Vitamin D":   {"loinc": "1989-3",  "unit": "nmol/L", "bad": "down",
+                    "syn": ["vitamin d", "25-oh", "25(oh)d", "vitamin d3",
+                            "kalciferol", "cholecalciferol"], "ref": (75, 250),
+                    "convert": {"ng/ml": 2.496, "µg/l": 2.496, "ug/l": 2.496}},
     "Hemoglobin":  {"loinc": "718-7",   "unit": "g/L",    "bad": "down",
                     "syn": ["hemoglobin", "hämoglobin", "hgb", "hb "], "ref": (130, 175),
                     "convert": {"g/dl": 10.0}},
@@ -876,13 +882,26 @@ CKG_SEED = [
     ("CRP", "INDICATES", "Inflamacija"),
     ("Kreatinin", "INDICATES", "Bubrežna funkcija"),
     ("Visok unos soli", "EXACERBATES", "Non-dipping pritisak"),
+    # --- Suplement-specifične kontraindikacije (Faza: Suplementacija) ---
+    ("Kalijum suplement", "CONTRAINDICATED_BY", "Hiperkalemija ili nizak eGFR"),
+    ("Magnezijum suplement", "CONTRAINDICATED_BY", "Nizak eGFR (<60 ml/min)"),
+    ("Kalcijum suplement", "CONTRAINDICATED_BY", "Hiperkalcijemija"),
+    ("Gvožđe suplement", "CONTRAINDICATED_BY", "Normalan ili visok feritin"),
+    ("Visoka doza Vitamina D", "CONTRAINDICATED_BY", "Hiperkalcijemija"),
+    ("Vitamin K", "CONTRAINDICATED_BY", "Antikoagulantna terapija (varfarin)"),
+    ("Omega-3 visoka doza", "CONTRAINDICATED_BY", "Antikoagulantna/antiagregaciona terapija"),
+    ("Kalijum suplement", "CONTRAINDICATED_BY", "ACE inhibitor ili diuretik koji štedi kalijum"),
 ]
 
 
 def seed_ckg() -> None:
-    if q_one("SELECT 1 FROM ckg_edges LIMIT 1"):
-        return
-    q_execmany("INSERT INTO ckg_edges (src, rel, dst) VALUES (?,?,?)", CKG_SEED)
+    """Dodaje samo NEDOSTAJUĆE ivice (idempotentno) — sigurno za pozivanje i
+    kad je tabela već delimično popunjena (npr. posle proširenja CKG_SEED)."""
+    existing = {(r["src"], r["rel"], r["dst"]) for r in
+                q_all("SELECT src, rel, dst FROM ckg_edges")}
+    missing = [e for e in CKG_SEED if e not in existing]
+    if missing:
+        q_execmany("INSERT INTO ckg_edges (src, rel, dst) VALUES (?,?,?)", missing)
 
 
 def ckg_context() -> str:
@@ -1480,6 +1499,161 @@ def get_consortium_detail():
         return None
 
 
+# =========================================================================== #
+#  SUPLEMENTACIJA — poseban, ručni poziv (1 API poziv) koji ČITA poslednji
+#  zapisnik konzilijuma umesto da ponavlja svih 6 agenata. Predlaže SAMO
+#  suplemente sa potvrđenom efikasnošću (NIH ODS / EFSA nivo dokaza), sa
+#  konkretnim dozama. Tvrde brave u kodu (ne u AI-ju) sprečavaju opasne
+#  predloge kod bubrežne insuficijencije / već potvrđenog viška nutrijenta.
+# =========================================================================== #
+SUPPLEMENT_SYSTEM = """Ti si Agent SUPLEMENTOLOG — klinički farmakolog/nutricionista \
+fokusiran ISKLJUČIVO na dokazanu efikasnost. Radiš po smernicama NIH Office of \
+Dietary Supplements (ODS fact sheets) i EFSA (gornji bezbedni limiti unosa).
+
+STROGO PRAVILO — DOKAZANA EFIKASNOST: Predlaži SAMO suplemente za koje postoji \
+JAK, opšte prihvaćen naučni konsenzus da koriguju POTVRĐEN laboratorijski deficit \
+(npr. vitamin D kod niskog 25-OH-D, B12 kod niskog B12, gvožđe kod potvrđene \
+sideropenije uz nizak feritin, folna kiselina kod niskog folata, magnezijum kod \
+potvrđeno niskog nivoa, omega-3 kod povišenih triglicerida). NIKAD ne predlaži \
+„modne"/nepotvrđene suplemente (detoks mešavine, imunitet-bez-dokaza, itd.) — \
+ako dokazi nisu jaki za KONKRETAN nalaz ovog korisnika, eksplicitno napiši da \
+nema dovoljno osnova, umesto da nešto izmišljaš.
+
+OBAVEZNO uzmi u obzir:
+- Kompletnu lab istoriju i trend (ne samo poslednju vrednost).
+- Mišljenja i rizik-skorove specijalista konzilijuma i već razrešene sukobe
+  (protiv-teg filter) — ne predlaži ništa što je konzilijum već označio kao rizično.
+- LEKOVE koje korisnik trenutno koristi (iz konteksta) — eksplicitno proveri
+  interakciju leka i suplementa i pomeni je ako postoji.
+- Klinički graf znanja (CKG) — kontraindikacije suplemenata.
+
+VRATI ISKLJUČIVO validan JSON (bez markdown ograda):
+{
+  "supplements": [
+    {"nutrient": "<npr. Vitamin D3>", "form": "<npr. holekalciferol, kapsula>",
+     "dose": "<KONKRETNA doza, npr. '2000 IU dnevno uz obrok'>",
+     "reason": "<vezano za konkretan lab nalaz ovog korisnika>",
+     "priority": "visok" | "umeren" | "nizak",
+     "retest_after_weeks": <broj>,
+     "interaction_check": "<eksplicitno: nema interakcije sa unetim lekovima | postoji interakcija sa X>",
+     "citation": {"guideline": "NIH ODS ili EFSA", "section": "<naziv fact sheet-a/sekcije>"},
+     "caution": "<upozorenje ako postoji>"}
+  ],
+  "avoided": [
+    {"nutrient": "<naziv>", "reason": "<zašto NIJE predložen — npr. nedovoljno dokaza,
+     već u referentnom opsegu, kontraindikacija zbog X>"}
+  ],
+  "disclaimer": "Ovo je savetodavna informacija — konsultuj lekara/farmaceuta pre početka bilo kog suplementa."
+}
+Sav tekst na srpskom. Ne izmišljaj DOI ni brojeve studija — citiraj samo naziv
+smernice/fact sheet-a."""
+
+
+def run_supplement_analysis(model_id: str, api_key: str) -> dict:
+    """Jedan API poziv: čita poslednji zapisnik konzilijuma + kompletnu lab
+    istoriju + CKG, predlaže suplemente sa konkretnim dozama. Rezultat prolazi
+    kroz tvrde Python bezbednosne filtere pre čuvanja (ispod)."""
+    client = _make_client(api_key)
+    bundle = clinical_data_bundle()
+    detail = get_consortium_detail() or {}
+    consortium_summary = json.dumps({
+        "sub_reports": {n: {"risk_score": r.get("risk_score"),
+                            "flags": r.get("flags", [])}
+                       for n, r in (detail.get("sub_reports") or {}).items()},
+        "resolution": detail.get("resolution", {}),
+    }, ensure_ascii=False)
+    msg = (f"PODACI PACIJENTA:\n{bundle}\n\n"
+           f"KLINIČKI GRAF ZNANJA (CKG):\n{ckg_context()}\n\n"
+           f"NALAZI/RIZICI IZ POSLEDNJEG KONZILIJUMA:\n{consortium_summary}\n\n"
+           f"Predloži suplementaciju kao JSON prema strukturi.")
+    with client.messages.stream(
+        model=model_id, max_tokens=2500, system=SUPPLEMENT_SYSTEM,
+        messages=[{"role": "user", "content": msg}],
+    ) as stream:
+        resp = stream.get_final_message()
+    raw = "".join(b.text for b in resp.content if b.type == "text")
+    return _parse_json(raw)
+
+
+def _apply_supplement_safety_filter(data: dict) -> dict:
+    """TVRDA brava u kodu (ne u AI-ju) — deterministički uklanja opasne predloge
+    bez obzira šta je AI predložio. Isti princip kao Red Flags."""
+    tl = lab_timeline()
+
+    def last_val(canon):
+        pts = tl.get(canon) or []
+        return pts[-1][1] if pts else None
+
+    egfr = last_val("eGFR")
+    kalijum = last_val("Kalijum")
+    feritin = last_val("Feritin")
+    kalcijum = last_val("Kalcijum")
+
+    blocked_terms = {
+        "kalijum": (egfr is not None and egfr < 60) or (kalijum is not None and kalijum >= 5.0),
+        "magnezijum": egfr is not None and egfr < 60,
+        "gvožđe": feritin is not None and feritin >= 150,  # dovoljne zalihe — rizik od preopterećenja
+        "kalcijum": kalcijum is not None and kalcijum > 2.6,
+    }
+
+    kept, blocked = [], list(data.get("avoided") or [])
+    for s in (data.get("supplements") or []):
+        nutrient_lc = str(s.get("nutrient", "")).lower()
+        hit = next((term for term, cond in blocked_terms.items()
+                   if term in nutrient_lc and cond), None)
+        if hit:
+            blocked.append({"nutrient": s.get("nutrient"),
+                            "reason": f"BLOKIRANO (bezbednosni filter): postojeći lab nalaz "
+                                     f"({hit}) čini ovaj suplement rizičnim — AI predlog je "
+                                     f"automatski odbačen bez obzira na obrazloženje."})
+        else:
+            kept.append(s)
+    data["supplements"] = kept
+    data["avoided"] = blocked
+    return data
+
+
+def _load_supplement_cached():
+    """Učitava POSLEDNJI predlog suplementacije — BEZ ikakvog AI poziva.
+    Vraća (data|None, is_stale)."""
+    row = q_one("SELECT * FROM supplement_plans WHERE id = 1")
+    if not row:
+        return None, False
+    try:
+        data = json.loads(row["content"])
+    except Exception:  # noqa: BLE001
+        return None, False
+    return data, row["signature"] != data_signature()
+
+
+def ensure_supplement_plan(force: bool = False):
+    """Generiše predlog suplementacije ISKLJUČIVO na zahtev (force=True, klik
+    dugmeta) — nikad automatski."""
+    if not force or not api_ready:
+        return None
+    if st.session_state.get("red_flags"):
+        return None  # kritično stanje — suplementi obustavljeni, isto kao hrana
+    sig = data_signature()
+    try:
+        with st.spinner("💊 Agent Suplementolog analizira lab nalaze i konzilijum…"):
+            data = run_supplement_analysis(model_id, api_key)
+            data = _apply_supplement_safety_filter(data)
+    except Exception as e:  # noqa: BLE001
+        em = str(e).lower()
+        if "credit balance" in em or "billing" in em or "quota" in em:
+            st.warning("💳 Anthropic nalog nema kredita — dopuni na "
+                       "console.anthropic.com → Plans & Billing.")
+        else:
+            st.warning(f"Ne mogu sada da predložim suplementaciju: {e}")
+        return None
+    q_exec("""INSERT INTO supplement_plans (id, generated_at, signature, content)
+              VALUES (1, ?, ?, ?)
+              ON CONFLICT (id) DO UPDATE SET generated_at=excluded.generated_at,
+                signature=excluded.signature, content=excluded.content""",
+           (datetime.now().isoformat(), sig, json.dumps(data, ensure_ascii=False)))
+    return data
+
+
 def load_cached_report():
     """Učitava POSLEDNJI sačuvan izveštaj konzilijuma — BEZ ikakvog AI poziva.
     Konzilijum se više NE saziva automatski; ovo samo čita ono što već postoji.
@@ -2053,6 +2227,52 @@ def render_dashboard():
             st.caption("Nema unetih lekova.")
         st.caption("📷 Skeniraj kutiju/uputstvo leka preko Smart Camere da ga dodaš — "
                    "aplikacija ga automatski uzima u obzir u svim procenama.")
+
+    st.write("")
+
+    # --- Suplementacija (sažeto — analiza SAMO na klik, nikad automatski) ---
+    sup, sup_stale = (None, False) if red_flags else _load_supplement_cached()
+    n_sup = len(sup.get("supplements") or []) if sup else 0
+    with st.expander(f"💊 Suplementacija ({n_sup} predloga)" if sup else "💊 Suplementacija"):
+        if red_flags:
+            st.caption("Obustavljeno dok je aktivno kritično upozorenje (Red Flag).")
+        elif not api_ready:
+            st.caption("Unesi ANTHROPIC_API_KEY (⚙️ levo) da bi mogao da zatražiš predlog.")
+        else:
+            st.caption("Agent Suplementolog (NIH ODS / EFSA) čita tvoju lab istoriju, "
+                       "mišljenje konzilijuma i unete lekove — predlaže SAMO suplemente "
+                       "sa potvrđenom efikasnošću za tvoj konkretan nalaz, sa konkretnim "
+                       "dozama. Opasni predlozi se automatski blokiraju (bezbednosni filter).")
+            if sup and sup_stale:
+                st.caption("📥 Ima novijih podataka od poslednjeg predloga.")
+            label = "🔍 Predloži suplementaciju" if not sup else "🔍 Osveži predlog"
+            if st.button(label, key="run_supplement", type="primary", use_container_width=True):
+                sup = ensure_supplement_plan(force=True)
+                st.rerun()
+
+        if sup:
+            for s in (sup.get("supplements") or []):
+                cit = s.get("citation") or {}
+                pr_col = {"visok": VERDICT["RED"], "umeren": VERDICT["YELLOW"],
+                          "nizak": VERDICT["GREEN"]}.get(s.get("priority", ""), VERDICT["YELLOW"])
+                st.markdown(
+                    f"<div class='mt-guard' style='border-color:{pr_col};background:{pr_col}1A'>"
+                    f"<b style='color:{pr_col}'>{s.get('nutrient','')}</b> — {s.get('dose','')}"
+                    f" <span class='mt-muted'>({s.get('form','')})</span><br>"
+                    f"{s.get('reason','')}<br>"
+                    f"<span class='mt-muted'>💊 Interakcija: {s.get('interaction_check','')} · "
+                    f"Ponovna provera za {s.get('retest_after_weeks','?')} ned. · "
+                    f"[{cit.get('guideline','')} — {cit.get('section','')}]</span>"
+                    + (f"<br><span style='color:{VERDICT['YELLOW']}'>⚠ {s['caution']}</span>"
+                       if s.get("caution") else "")
+                    + "</div>", unsafe_allow_html=True)
+            avoided = sup.get("avoided") or []
+            if avoided:
+                st.markdown("**⛔ Nije predloženo:**")
+                for a in avoided:
+                    st.markdown(f"- **{a.get('nutrient','')}** — {a.get('reason','')}")
+            if sup.get("disclaimer"):
+                st.caption(sup["disclaimer"])
 
     st.write("")
 
