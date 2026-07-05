@@ -222,13 +222,15 @@ def inject_css(mode: str) -> None:
             line-height:1.1 !important; white-space:nowrap;
         }}
 
-        /* Smart Camera: veliki (skoro pun ekran) preview umesto malog prozora */
+        /* Smart Camera: veći preview umesto malog prozora. Samo širina/
+        zaobljenost — bez object-fit/max-height, da se ne remeti Streamlit-ova
+        interna logika hvatanja kadra (snimak koristi prirodnu rezoluciju
+        video elementa, pa geometriju nije bezbedno prisilno menjati). */
         div[data-testid="stCameraInput"] {{ width:100% !important; }}
         div[data-testid="stCameraInput"] > div {{ width:100% !important; max-width:100% !important; }}
         div[data-testid="stCameraInput"] video,
         div[data-testid="stCameraInput"] img {{
-            width:100% !important; height:auto !important; max-height:76vh !important;
-            object-fit:cover !important; border-radius:16px !important;
+            width:100% !important; height:auto !important; border-radius:16px !important;
         }}
         </style>
         """,
