@@ -1835,8 +1835,9 @@ VRATI ISKLJUČIVO validan JSON (bez markdown ograda):
   } | null,
   "document": {
     "document_type": "<lab nalaz | lekarski izveštaj | otpusna lista | snimak | ostalo>",
+    "finding_date": "<YYYY-MM-DD — datum kada je nalaz URAĐEN/uzorkovan, pročitan SA dokumenta; null ako se nigde ne vidi>",
     "full_text": "<uredan tekst>",
-    "lab_results": [ {"parameter_name":"<...>","value":<broj>,"unit":"<...>","reference_range":"<... ili prazno>"} ],
+    "lab_results": [ {"parameter_name":"<...>","value":<broj>,"unit":"<...>","reference_range":"<... ili prazno>","date":"<YYYY-MM-DD ako baš taj parametar ima poseban datum, inače null>"} ],
     "diagnoses": ["<dijagnoza>"], "summary": "<2-3 rečenice>"
   } | null,
   "medication": {
@@ -1863,6 +1864,10 @@ PRAVILA za food: NE generička recenzija — ukrsti sa korisnikovim pritiskom, d
 i lab nalazima (visok natrijum + povišen pritisak → RED/YELLOW, itd.).
 PRAVILA za medication: Čitaj TAČNO naziv i jačinu sa kutije/blistera/uputstva —
 ne pogađaj. Ako aktivna supstanca nije eksplicitno napisana, ostavi null (ne izmišljaj).
+PRAVILA za medical_document: OBAVEZNO pronađi DATUM kada je nalaz urađen (datum
+uzorkovanja/analize/izveštaja — obično u zaglavlju dokumenta) i upiši ga u finding_date
+u formatu YYYY-MM-DD. Taj datum je KLJUČAN da konzilijum prati hronologiju zdravlja —
+NIKAD ne koristi današnji datum ako na dokumentu postoji datum nalaza.
 Sav opisni tekst na srpskom."""
 
 
@@ -2564,9 +2569,38 @@ def _transfer_vitals_to_entry(vit: dict):
             "proveri i klikni Sačuvaj.")
 
 
+def _parse_finding_date(s) -> str | None:
+    """Datum nalaza SA DOKUMENTA → ISO 'YYYY-MM-DD'. Podržava ISO i EU formate
+    (dd.mm.yyyy, dd/mm/yyyy…). Odbacuje budući ili besmisleno star datum (verovatno
+    pogrešno očitan) → tada vraća None pa se koristi rezerva. Ovo drži vremensku osu
+    tačnom, da konzilijum prati pravu hronologiju zdravlja pacijenta."""
+    s = str(s or "").strip()
+    if not s:
+        return None
+    for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%d.%m.%y", "%d/%m/%Y", "%d/%m/%y",
+                "%d-%m-%Y", "%Y/%m/%d", "%d. %m. %Y."):
+        try:
+            d = datetime.strptime(s.strip(), fmt).date()
+        except ValueError:
+            continue
+        if 1950 <= d.year and d <= date.today():
+            return d.isoformat()
+    return None
+
+
 def _store_and_show_doc(doc: dict):
-    """Prikaz medicinskog dokumenta + auto-čuvanje prepoznatih lab nalaza."""
+    """Prikaz medicinskog dokumenta + auto-čuvanje prepoznatih lab nalaza.
+    Datum svakog nalaza se čita SA DOKUMENTA (finding_date) da bi vremenska osa i
+    konzilijum bili hronološki tačni; ako datum nije čitljiv → današnji, uz upozorenje."""
     st.markdown(f"#### 📄 {str(doc.get('document_type', 'Dokument')).title()}")
+    doc_date = _parse_finding_date(doc.get("finding_date"))
+    fallback = date.today().isoformat()
+    if doc_date:
+        st.caption(f"🗓️ Datum nalaza (sa dokumenta): **{doc_date}** — koristi se za hronologiju.")
+    else:
+        st.warning("🗓️ Na dokumentu nije pronađen datum nalaza — privremeno se upisuje "
+                   "današnji datum. Ako znaš tačan datum, ispravi ga (obriši i unesi ručno "
+                   "sa tačnim datumom) da konzilijum ima tačnu hronologiju.")
     if doc.get("summary"):
         st.caption(doc["summary"])
     with st.expander("Pročitani tekst"):
@@ -2576,12 +2610,13 @@ def _store_and_show_doc(doc: dict):
     if labs:
         for l in labs:
             try:
+                row_date = _parse_finding_date(l.get("date")) or doc_date or fallback
                 q_exec(
                     """INSERT INTO lab_results (parameter_name,value,unit,
                        reference_range,test_date) VALUES (?,?,?,?,?)""",
                     (l.get("parameter_name", "?"), float(l.get("value", 0)),
                      l.get("unit", ""), l.get("reference_range", ""),
-                     date.today().isoformat()))
+                     row_date))
                 saved += 1
             except (ValueError, TypeError):
                 continue
@@ -2791,13 +2826,15 @@ def render_entry():
                         dxs = [str(d).strip() for d in (doc.get("diagnoses") or []) if str(d).strip()]
                         if dxs:
                             report = (doc.get("full_text") or doc.get("summary") or "")[:2000]
+                            dx_date = _parse_finding_date(doc.get("finding_date")) or date.today().isoformat()
                             for d in dxs:
                                 q_exec(
                                     """INSERT INTO medical_history (diagnosis_name,
                                        doctor_report_text,date_diagnosed,status)
                                        VALUES (?,?,?,?)""",
-                                    (d, report, date.today().isoformat(), "active"))
-                            st.success("Sačuvane dijagnoze: " + ", ".join(dxs))
+                                    (d, report, dx_date, "active"))
+                            st.success(f"Sačuvane dijagnoze (datum izveštaja: {dx_date}): "
+                                       + ", ".join(dxs))
                             if doc.get("summary"):
                                 st.caption(doc["summary"])
                         else:
