@@ -2026,36 +2026,37 @@ def render_dashboard():
 
     st.write("")
 
-    # --- Medicinski karton ---
-    cc_left, cc_right = st.columns(2)
-    with cc_left:
-        st.markdown("### 📋 Medicinski karton")
-        dx = active_diagnoses()
+    # --- Medicinski karton (sažeto — sadržaj se prikazuje tek na klik) ---
+    dx = active_diagnoses()
+    labs = latest_labs()
+    with st.expander(f"📋 Medicinski karton ({len(dx)} dijagnoza · {len(labs)} nalaza)"):
         if dx:
             chips = "".join(f"<span class='mt-chip'>{d['diagnosis_name']}</span>" for d in dx)
             st.markdown(chips, unsafe_allow_html=True)
         else:
             st.caption("Nema aktivnih dijagnoza.")
         st.write("")
-        for l in latest_labs():
+        for l in labs:
             ref = l["reference_range"] or ""
             st.markdown(
                 f"**{l['parameter_name']}** — {l['value']} {l['unit']}  "
                 f"<span class='mt-muted'>(ref {ref})</span>", unsafe_allow_html=True)
 
-    with cc_right:
-        st.markdown("### ✨ AI Health Guard")
-        insights = st.session_state.get("daily_insights", [])
-        if not api_ready:
-            st.caption("Unesi API ključ u ⚙️ (levo) za personalizovane uvide.")
-        elif not insights:
-            st.caption("Uvidi se generišu uz dnevno stanje organizma (gore).")
-        for ins in insights:
-            col = VERDICT.get(str(ins.get("status", "YELLOW")).upper(), VERDICT["YELLOW"])
-            st.markdown(
-                f"<div class='mt-guard' style='border-color:{col};background:{col}1A'>"
-                f"<b style='color:{col}'>{ins.get('title','')}</b><br>{ins.get('message','')}</div>",
-                unsafe_allow_html=True)
+    st.write("")
+
+    # --- AI Health Guard ---
+    st.markdown("### ✨ AI Health Guard")
+    insights = st.session_state.get("daily_insights", [])
+    if not api_ready:
+        st.caption("Unesi API ključ u ⚙️ (levo) za personalizovane uvide.")
+    elif not insights:
+        st.caption("Uvidi se generišu uz dnevno stanje organizma (gore).")
+    for ins in insights:
+        col = VERDICT.get(str(ins.get("status", "YELLOW")).upper(), VERDICT["YELLOW"])
+        st.markdown(
+            f"<div class='mt-guard' style='border-color:{col};background:{col}1A'>"
+            f"<b style='color:{col}'>{ins.get('title','')}</b><br>{ins.get('message','')}</div>",
+            unsafe_allow_html=True)
 
 
 # =========================================================================== #
