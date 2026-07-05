@@ -236,29 +236,6 @@ def inject_css(mode: str) -> None:
     )
 
 
-def ring_svg(percent: float, top: str, bottom: str, color: str) -> str:
-    """Mali SVG donut prsten za vitalne znake (premium izgled)."""
-    r, c = 46, 46
-    circ = 2 * 3.14159 * 40
-    off = circ * (1 - max(0.0, min(1.0, percent)))
-    track = PALETTES[st.session_state.get("theme", "light")]["sunken"]
-    text = PALETTES[st.session_state.get("theme", "light")]["text"]
-    muted = PALETTES[st.session_state.get("theme", "light")]["muted"]
-    return f"""
-    <div style="text-align:center">
-      <svg width="104" height="104" viewBox="0 0 92 92">
-        <circle cx="{c}" cy="{c}" r="40" fill="none" stroke="{track}" stroke-width="8"/>
-        <circle cx="{c}" cy="{c}" r="40" fill="none" stroke="{color}" stroke-width="8"
-          stroke-linecap="round" stroke-dasharray="{circ:.1f}" stroke-dashoffset="{off:.1f}"
-          transform="rotate(-90 {c} {c})"/>
-        <text x="{c}" y="{c-2}" text-anchor="middle" font-size="15" font-weight="700"
-          fill="{text}">{top}</text>
-        <text x="{c}" y="{c+14}" text-anchor="middle" font-size="10"
-          fill="{muted}">{bottom}</text>
-      </svg>
-    </div>"""
-
-
 def heart_svg(color: str = "#fb7185", size: int = 44) -> str:
     return (
         f'<svg width="{size}" height="{size}" viewBox="0 0 24 24" fill="{color}" '
@@ -2033,44 +2010,6 @@ def render_dashboard():
         """, unsafe_allow_html=True)
     else:
         st.info("Još nema vitalnih podataka — skeniraj merač pritiska ili dodaj na „Unos podataka“.")
-
-    st.write("")
-
-    # --- Detaljni vitalni znaci (san + dodatne metrike) ---
-    st.markdown("### 🌙 San i detaljne metrike")
-    if v:
-        sleep = v["sleep_duration"] or 0
-        deep = v["deep_sleep_duration"] or 0
-        rem = v["rem_sleep_duration"] or 0
-        r1, r2, r3 = st.columns(3)
-        with r1:
-            st.markdown(ring_svg(min(sleep / 480, 1), f"{sleep//60}h {sleep%60:02d}m",
-                                 "San", PALETTES[st.session_state["theme"]]["primary"]),
-                        unsafe_allow_html=True)
-        with r2:
-            st.markdown(ring_svg(min(deep / 120, 1), f"{deep//60}h {deep%60:02d}m",
-                                 "Duboki", PALETTES[st.session_state["theme"]]["amber"]),
-                        unsafe_allow_html=True)
-        with r3:
-            st.markdown(ring_svg(min(rem / 150, 1), f"{rem//60}h {rem%60:02d}m",
-                                 "REM", PALETTES[st.session_state["theme"]]["copper"]),
-                        unsafe_allow_html=True)
-
-        m1, m2, m3, m4 = st.columns(4)
-        bp = (f"{v['blood_pressure_sys']}/{v['blood_pressure_dia']}"
-              if v["blood_pressure_sys"] else "—")
-        for col, val, unit, lab in [
-            (m1, v["heart_rate"] or "—", "bpm", "Puls (mirovanje)"),
-            (m2, v["stress_level"] or "—", "/100", "Stres"),
-            (m3, v["restless_count"] or "—", "x", "Nemiran san"),
-            (m4, bp, "mmHg", "Krvni pritisak"),
-        ]:
-            with col:
-                st.markdown(
-                    f"<div class='mt-metric'><div class='v'>{val} <span class='u'>{unit}</span></div>"
-                    f"<div class='l'>{lab}</div></div>", unsafe_allow_html=True)
-    else:
-        st.info("Još nema vitalnih podataka — dodaj ih na kartici „Unos podataka“.")
 
     st.write("")
 
