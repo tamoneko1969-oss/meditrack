@@ -1467,50 +1467,48 @@ def get_consortium_detail():
         return None
 
 
-def ensure_daily_report(force: bool = False):
-    """Pri pokretanju: ako ima novih unosa/dokumenata ili je novi dan, SAZIVA
-    KONZILIJUM (multi-agent konsenzus); inače vraća keširan izveštaj.
-    Red Flags (tvrda brava) potpuno preskaču AI."""
-    if not api_ready:
-        return None
-    if st.session_state.get("red_flags"):
-        return None  # kritično stanje — saveti blokirani, AI se ne poziva
+def load_cached_report():
+    """Učitava POSLEDNJI sačuvan izveštaj konzilijuma — BEZ ikakvog AI poziva.
+    Konzilijum se više NE saziva automatski; ovo samo čita ono što već postoji.
+    Vraća (report_dict|None, is_stale) — is_stale=True znači da ima novijih
+    unosa od poslednjeg sazivanja (samo informativno, ne pokreće ništa)."""
+    rep = get_daily_report()
+    if not rep:
+        return None, False
+    try:
+        data = json.loads(rep["content"])
+    except Exception:  # noqa: BLE001
+        return None, False
+    is_stale = rep["signature"] != data_signature()
+    return data, is_stale
+
+
+def run_consortium_and_save():
+    """Saziva konzilijum ISKLJUČIVO na zahtev (klik na dugme „Konzilijum")."""
     sig = data_signature()
     today = date.today().isoformat()
-    rep = get_daily_report()
-    stale = force or (rep is None) or (rep["report_date"] != today) or (rep["signature"] != sig)
-    if stale:
-        try:
-            with st.status("🧠 Konzilijum zaseda — analiza novih podataka…",
-                           expanded=False) as status:
-                data = run_consortium(model_id, api_key, status)
-                status.update(label="✅ Konzilijum završio konsenzus.", state="complete")
-        except Exception as e:  # noqa: BLE001
-            em = str(e).lower()
-            if "credit balance" in em or "billing" in em or "quota" in em:
-                st.warning("💳 Anthropic nalog nema kredita — dopuni na "
-                           "console.anthropic.com → Plans & Billing.")
-            else:
-                # Rezerva: stari brzi mozak, da Dashboard ne ostane prazan
-                try:
-                    data = generate_daily_report(model_id, api_key)
-                    save_daily_report(today, sig, json.dumps(data, ensure_ascii=False))
-                    st.caption(f"Konzilijum nedostupan ({str(e)[:120]}) — prikazana brza procena.")
-                    return data
-                except Exception:  # noqa: BLE001
-                    st.warning(f"Ne mogu sada da generišem dnevno stanje: {e}")
-            if rep:
-                try:
-                    return json.loads(rep["content"])
-                except Exception:  # noqa: BLE001
-                    return None
-            return None
-        save_daily_report(today, sig, json.dumps(data, ensure_ascii=False))
-        return data
     try:
-        return json.loads(rep["content"])
-    except Exception:  # noqa: BLE001
+        with st.status("🧠 Konzilijum zaseda — analiza podataka…",
+                       expanded=False) as status:
+            data = run_consortium(model_id, api_key, status)
+            status.update(label="✅ Konzilijum završio konsenzus.", state="complete")
+    except Exception as e:  # noqa: BLE001
+        em = str(e).lower()
+        if "credit balance" in em or "billing" in em or "quota" in em:
+            st.warning("💳 Anthropic nalog nema kredita — dopuni na "
+                       "console.anthropic.com → Plans & Billing.")
+        else:
+            # Rezerva: stari brzi mozak, da Dashboard ne ostane prazan
+            try:
+                data = generate_daily_report(model_id, api_key)
+                save_daily_report(today, sig, json.dumps(data, ensure_ascii=False))
+                st.caption(f"Konzilijum nedostupan ({str(e)[:120]}) — prikazana brza procena.")
+                return data
+            except Exception:  # noqa: BLE001
+                st.warning(f"Ne mogu sada da generišem dnevno stanje: {e}")
         return None
+    save_daily_report(today, sig, json.dumps(data, ensure_ascii=False))
+    return data
 
 
 VITALS_SYSTEM = """Ti čitaš VREDNOSTI sa ekrana medicinskog uređaja na osnovu OCR \
@@ -1844,9 +1842,23 @@ def render_dashboard():
         render_red_flag_screen(red_flags)
         st.write("")
 
-    # --- Dnevno stanje organizma (KONZILIJUM: regeneriše se na nove unose / novi dan) ---
-    report = None if red_flags else ensure_daily_report(
-        force=st.session_state.pop("force_daily", False))
+    # --- Dnevno stanje organizma — SAMO na zahtev (dugme „Konzilijum"), ---
+    # --- više se NE saziva automatski posle svakog novog unosa. ---
+    report, is_stale = (None, False) if red_flags else load_cached_report()
+    if not red_flags:
+        if not api_ready:
+            st.info("Unesi ANTHROPIC_API_KEY (⚙️ levo) da bi mogao da sazoveš konzilijum.")
+        else:
+            if report and is_stale:
+                st.caption("📥 Ima novijih unosa od poslednjeg sazivanja konzilijuma.")
+            elif not report:
+                st.caption("Konzilijum (6 specijalista + nutricionista) još nije sazivan.")
+            if st.button("🧠 Konzilijum", key="run_konzilijum",
+                        type="primary", use_container_width=True):
+                report = run_consortium_and_save()
+                st.rerun()
+            st.write("")
+
     if report:
         dcol = VERDICT.get(str(report.get("overall", "YELLOW")).upper(), VERDICT["YELLOW"])
         score = report.get("score", "—")
@@ -1922,13 +1934,7 @@ def render_dashboard():
                                 f"<span class='mt-muted'>{c.get('claim', '')}</span>",
                                 unsafe_allow_html=True)
 
-        if st.button("🔄 Sazovi konzilijum ponovo", key="refresh_daily"):
-            st.session_state["force_daily"] = True
-            st.rerun()
         st.session_state["daily_insights"] = report.get("insights") or []
-    elif not api_ready:
-        st.info("Unesi ANTHROPIC_API_KEY (⚙️ levo) — MediTrack tada svakog dana automatski "
-                "proverava nove unose i procenjuje dnevno stanje organizma.")
 
     st.write("")
 
