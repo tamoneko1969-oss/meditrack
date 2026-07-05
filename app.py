@@ -2234,8 +2234,11 @@ def render_camera():
 
 def _transfer_vitals_to_entry(vit: dict):
     """Prebacuje pročitana merenja (pritisak/puls...) u formu „Unos podataka"
-    na proveru i čuvanje — umesto tihog upisa u bazu."""
-    rdt = _parse_reading_dt(vit)
+    na proveru i čuvanje — umesto tihog upisa u bazu.
+    Datum/vreme unosa je UVEK stvarni trenutak skeniranja (aplikacija ga sama
+    generiše), a ne vreme pročitano sa ekrana uređaja — sat na meraču/satu
+    često nije tačno podešen, dok je vreme skeniranja pouzdano i precizno."""
+    rdt = datetime.now().replace(second=0, microsecond=0)
     vals = {
         "ev_sys": _iv(vit, "blood_pressure_sys"),
         "ev_dia": _iv(vit, "blood_pressure_dia"),
@@ -2331,27 +2334,6 @@ def _iv(res: dict, key: str) -> int:
         return int(float(v)) if v not in (None, "") else 0
     except (ValueError, TypeError):
         return 0
-
-
-def _parse_reading_dt(res: dict) -> datetime:
-    """Spaja pročitani datum/vreme sa ekrana u datetime (fallback: sada)."""
-    now = datetime.now()
-    d, t = now.date(), now.time().replace(second=0, microsecond=0)
-    rd = res.get("reading_date")
-    if rd:
-        try:
-            d = datetime.strptime(rd, "%Y-%m-%d").date()
-        except (ValueError, TypeError):
-            pass
-    rt = res.get("reading_time")
-    if rt:
-        for fmt in ("%H:%M", "%H.%M"):
-            try:
-                t = datetime.strptime(rt.strip(), fmt).time()
-                break
-            except (ValueError, TypeError):
-                continue
-    return datetime.combine(d, t)
 
 
 # =========================================================================== #
