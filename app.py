@@ -434,6 +434,16 @@ def latest_vitals():
     return q_one("SELECT * FROM user_vitals ORDER BY timestamp DESC LIMIT 1")
 
 
+def all_vitals():
+    """Sva sačuvana merenja, od najnovijeg ka starijem — za arhivu u „Unos podataka"."""
+    return q_all("SELECT * FROM user_vitals ORDER BY timestamp DESC")
+
+
+def delete_vitals(vid: int) -> None:
+    """Briše jedno merenje iz arhive (za uklanjanje pogrešnog/duplog unosa)."""
+    q_exec("DELETE FROM user_vitals WHERE id = ?", (vid,))
+
+
 def active_diagnoses():
     return q_all(
         "SELECT * FROM medical_history WHERE status='active' ORDER BY date_diagnosed DESC"
@@ -2669,6 +2679,47 @@ _EV_DEFAULTS = {"ev_hr": 60, "ev_stress": 30, "ev_restless": 0, "ev_sleep": 420,
                 "ev_deep": 90, "ev_rem": 110, "ev_sys": 120, "ev_dia": 80}
 
 
+def _render_vitals_archive():
+    """📁 Folder-arhiva svih prethodnih merenja sa datumom i vremenom.
+    Podrazumevano samo pregled; brisanje se otključava „Režimom brisanja"
+    (da se na telefonu ne obriše nešto slučajnim dodirom)."""
+    rows = all_vitals()
+    with st.expander(f"📁 Arhiva svih merenja ({len(rows)})"):
+        if not rows:
+            st.caption("Još nema sačuvanih merenja — prvo merenje dodaj gore ili preko Smart camere.")
+            return
+        edit = st.toggle("🗑 Režim brisanja (za uklanjanje pogrešnog/duplog unosa)",
+                         key="vit_arch_edit")
+        st.caption("Sva merenja, od najnovijeg ka starijem. Vreme je onako kako je "
+                   "uneto — sa displeja merača ili trenutak unosa.")
+        for r in rows:
+            try:
+                ts = datetime.fromisoformat(r["timestamp"]).strftime("%d.%m.%Y · %H:%M")
+            except (ValueError, TypeError):
+                ts = str(r["timestamp"])[:16].replace("T", " ")
+            bp = (f"{r['blood_pressure_sys']}/{r['blood_pressure_dia']} mmHg"
+                  if r["blood_pressure_sys"] else "—")
+            parts = [f"🩸 {bp}"]
+            if r["heart_rate"]:
+                parts.append(f"♥ {r['heart_rate']} bpm")
+            if r["stress_level"]:
+                parts.append(f"😰 {r['stress_level']}/100")
+            if r["sleep_duration"]:
+                sl = r["sleep_duration"]
+                parts.append(f"😴 {sl // 60}h{sl % 60:02d}m")
+            line = f"**🕒 {ts}**  \n{' · '.join(parts)}"
+            if edit:
+                c1, c2 = st.columns([5, 1])
+                c1.markdown(line)
+                if c2.button("🗑", key=f"_del_vit_{r['id']}", help="Obriši ovo merenje"):
+                    delete_vitals(r["id"])
+                    st.toast("Merenje obrisano iz arhive.")
+                    st.rerun()
+            else:
+                st.markdown(line)
+            st.divider()
+
+
 def render_entry():
     # Posle čuvanja: očisti polja i prefill oznaku (pre kreiranja widgeta)
     if st.session_state.pop("_entry_saved", False):
@@ -2715,6 +2766,8 @@ def render_entry():
                 st.session_state["_entry_saved"] = True
                 st.success("Vitalni znaci sačuvani — Dashboard ažuriran.")
                 st.rerun()
+
+        _render_vitals_archive()
 
     with t2:
         st.markdown("##### 📎 Otpremi lekarski izveštaj — AI izvuče dijagnoze")
