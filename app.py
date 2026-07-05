@@ -2055,7 +2055,8 @@ def render_dashboard():
             if st.button("🧠 Konzilijum", key="run_konzilijum",
                         type="primary", use_container_width=True):
                 report = run_consortium_and_save()
-                st.rerun()
+                if report is not None:
+                    st.rerun()  # samo na uspeh — greška ostaje vidljiva ako pukne
             st.write("")
 
     if report:
@@ -2248,10 +2249,17 @@ def render_dashboard():
             label = "🔍 Predloži suplementaciju" if not sup else "🔍 Osveži predlog"
             if st.button(label, key="run_supplement", type="primary", use_container_width=True):
                 sup = ensure_supplement_plan(force=True)
-                st.rerun()
+                if sup is not None:
+                    st.rerun()  # samo na uspeh — greška ostaje vidljiva ako pukne
 
         if sup:
-            for s in (sup.get("supplements") or []):
+            supplements = sup.get("supplements") or []
+            avoided_preview = sup.get("avoided") or []
+            if not supplements and not avoided_preview:
+                st.info("✅ Na osnovu trenutnih lab nalaza, nema suplementa sa dovoljno "
+                        "jakim dokazima za predlog — svi praćeni nutrijenti su ili u "
+                        "referentnom opsegu ili nema dovoljno podataka o njima.")
+            for s in supplements:
                 cit = s.get("citation") or {}
                 pr_col = {"visok": VERDICT["RED"], "umeren": VERDICT["YELLOW"],
                           "nizak": VERDICT["GREEN"]}.get(s.get("priority", ""), VERDICT["YELLOW"])
