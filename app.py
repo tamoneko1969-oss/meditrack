@@ -483,6 +483,46 @@ def vitals_series(days: int):
     )
 
 
+def bp_stats() -> dict:
+    """Prosek SYS/DIA/pulsa + broj merenja za tri prozora: danas, 7 dana, 30 dana.
+    Računa SAMO iz unosa koji imaju upisan pritisak (prazni/samo-san unosi se
+    ignorišu). Ne koristi AI — čист SQL prosek, osvežava se na svaki novi unos."""
+    now = datetime.now()
+    windows = {
+        "day":   date.today().isoformat(),
+        "week":  (now - timedelta(days=7)).isoformat(),
+        "month": (now - timedelta(days=30)).isoformat(),
+    }
+    out = {}
+    for key, cutoff in windows.items():
+        rows = q_all(
+            """SELECT blood_pressure_sys s, blood_pressure_dia d, heart_rate h
+               FROM user_vitals
+               WHERE blood_pressure_sys IS NOT NULL AND blood_pressure_dia IS NOT NULL
+                 AND timestamp >= ?""",
+            (cutoff,))
+        n = len(rows)
+        hrs = [r["h"] for r in rows if r["h"]]
+        out[key] = {
+            "n": n,
+            "sys": round(sum(r["s"] for r in rows) / n) if n else None,
+            "dia": round(sum(r["d"] for r in rows) / n) if n else None,
+            "hr":  round(sum(hrs) / len(hrs)) if hrs else None,
+        }
+    return out
+
+
+def _bp_stat_color(sys, dia) -> str:
+    """Boja proseka po istim pragovima kao status-pilula (compute_status)."""
+    if not sys or not dia:
+        return "#7d8590"
+    if sys >= 140 or dia >= 90:
+        return VERDICT["RED"]
+    if sys >= 130 or dia >= 85:
+        return VERDICT["YELLOW"]
+    return VERDICT["GREEN"]
+
+
 def get_profile():
     """Lični profil korisnika (godine, visina, težina, pol) — jedan red (id=1)."""
     return q_one("SELECT * FROM user_profile WHERE id = 1")
@@ -2037,6 +2077,11 @@ def render_dashboard():
         f" <span class='mt-muted' style='font-size:.82rem'>· obrađeno iz poslednjeg "
         f"unosa ({last_ts})</span>", unsafe_allow_html=True)
 
+    rc1, _rc2 = st.columns([1, 2])
+    if rc1.button("🔄 Osveži podatke", key="refresh_dash", use_container_width=True,
+                  help="Učitava najnovije unose (pritisak, puls…) BEZ konzilijuma — bez troška."):
+        st.rerun()
+
     st.write("")
 
     # --- RED FLAGS: dominantan kritičан ekran, blokira sve AI savete ---
@@ -2146,12 +2191,33 @@ def render_dashboard():
     if v:
         bp = (f"{v['blood_pressure_sys']}/{v['blood_pressure_dia']}"
               if v["blood_pressure_sys"] else "—")
-        sl = v["sleep_duration"] or 0
-        sleep_txt = f"{sl//60}h {sl%60:02d}m" if sl else "—"
-        sleep_pct = min(sl / 480, 1) if sl else 0
         sys_series = [r["blood_pressure_sys"] for r in vitals_series(30)
                       if r["blood_pressure_sys"]]
         clock = v["timestamp"][11:16] if len(v["timestamp"]) >= 16 else ""
+
+        _s = bp_stats()
+
+        def _stat_col(w):
+            x = _s[w]
+            bp_txt = f"{x['sys']}/{x['dia']}" if x["n"] else "—"
+            sub = (f"{x['n']} mer." + (f" · ♥{x['hr']}" if x["hr"] else "")) if x["n"] else "nema"
+            return bp_txt, _bp_stat_color(x["sys"], x["dia"]), sub
+        _d, _w, _m = _stat_col("day"), _stat_col("week"), _stat_col("month")
+        bp_stats_html = (
+            "<div class='vcard' style='display:block'>"
+            "<div class='k'>📊 Statistika pritiska — prosek (mmHg)</div>"
+            "<div style='display:flex;gap:8px;margin-top:10px;text-align:center'>"
+            f"<div style='flex:1'><div class='sub'>DANAS</div>"
+            f"<div style='font-size:1.15rem;font-weight:900;color:{_d[1]}'>{_d[0]}</div>"
+            f"<div class='sub'>{_d[2]}</div></div>"
+            f"<div style='flex:1;border-left:1px solid #ffffff1f'><div class='sub'>7 DANA</div>"
+            f"<div style='font-size:1.15rem;font-weight:900;color:{_w[1]}'>{_w[0]}</div>"
+            f"<div class='sub'>{_w[2]}</div></div>"
+            f"<div style='flex:1;border-left:1px solid #ffffff1f'><div class='sub'>30 DANA</div>"
+            f"<div style='font-size:1.15rem;font-weight:900;color:{_m[1]}'>{_m[0]}</div>"
+            f"<div class='sub'>{_m[2]}</div></div>"
+            "</div></div>"
+        )
 
         st.markdown(f"""
         <div class="phone-screen">
@@ -2179,12 +2245,7 @@ def render_dashboard():
             <div class="viz">{sparkline_svg(sys_series, PALETTES[st.session_state['theme']]['amber'])}</div>
           </div>
 
-          <div class="vcard">
-            <div><div class="k">San</div>
-              <div class="v">{sleep_txt}</div>
-              <div class="sub">stres {v['stress_level'] or '—'}/100</div></div>
-            <div class="viz">{mini_ring_svg(sleep_pct, PALETTES[st.session_state['theme']]['primary'])}</div>
-          </div>
+          {bp_stats_html}
         </div>
         """, unsafe_allow_html=True)
     else:
