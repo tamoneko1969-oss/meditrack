@@ -2784,6 +2784,60 @@ def _render_vitals_archive():
             st.divider()
 
 
+def _render_entries_archive():
+    """📁 Arhiva unosa — SVI uneti podaci OSIM merenja pritiska: laboratorijski
+    nalazi, snimci (CT/MR) sa mišljenjem lekara i dijagnoze. Poređano hronološki
+    po datumu SA DOKUMENTA (lab: test_date, dijagnoze/izveštaji: date_diagnosed),
+    od najnovijeg ka starijem."""
+    labs = q_all("SELECT parameter_name, value, unit, reference_range, test_date "
+                 "FROM lab_results ORDER BY test_date DESC, id DESC")
+    dxs = q_all("SELECT diagnosis_name, doctor_report_text, date_diagnosed, status "
+                "FROM medical_history ORDER BY date_diagnosed DESC")
+    lab_by_date: dict = {}
+    for l in labs:
+        lab_by_date.setdefault(l["test_date"], []).append(l)
+    events = [(d, "lab", items) for d, items in lab_by_date.items()]
+    events += [(dx["date_diagnosed"], "dx", dx) for dx in dxs]
+    events.sort(key=lambda e: (e[0] or ""), reverse=True)  # hronološki, najnovije prvo
+
+    with st.expander(f"📁 Arhiva unosa ({len(events)})"):
+        if not events:
+            st.caption("Još nema unetih laboratorijskih nalaza, snimaka ni dijagnoza. "
+                       "Dodaj ih preko Smart camere ili tabova „Dijagnoza“ / „Lab nalaz“.")
+            return
+        st.caption("Svi uneti podaci OSIM merenja pritiska — laboratorijski nalazi, "
+                   "snimci (CT/MR) sa mišljenjem lekara i dijagnoze. Poređano po datumu "
+                   "SA DOKUMENTA, od najnovijeg ka starijem.")
+        for date_str, typ, payload in events:
+            try:
+                ds = datetime.fromisoformat(str(date_str)).strftime("%d.%m.%Y")
+            except (ValueError, TypeError):
+                ds = str(date_str) if date_str else "— bez datuma"
+            if typ == "lab":
+                n = len(payload)
+                st.markdown(f"**🗓️ {ds} · 🧪 Laboratorijski nalaz** "
+                            f"({n} {'parametar' if n == 1 else 'parametara'})")
+                for l in payload:
+                    try:
+                        val_str = f"{float(l['value']):g}"
+                    except (TypeError, ValueError):
+                        val_str = str(l["value"])
+                    vu = f"{val_str} {l['unit'] or ''}".strip()
+                    ref = f"  ·  ref: {l['reference_range']}" if l["reference_range"] else ""
+                    st.markdown(f"- {l['parameter_name']}: **{vu}**"
+                                f"<span class='mt-muted'>{ref}</span>", unsafe_allow_html=True)
+            else:
+                smap = {"active": "aktivna", "monitoring": "praćenje", "resolved": "rešena"}
+                stt = smap.get(payload["status"] or "", payload["status"] or "")
+                st.markdown(f"**🗓️ {ds} · 🩺 {payload['diagnosis_name']}** "
+                            f"<span class='mt-muted'>· {stt}</span>", unsafe_allow_html=True)
+                rpt = (payload["doctor_report_text"] or "").strip()
+                if rpt:
+                    shown = rpt if len(rpt) <= 700 else rpt[:700] + " … (skraćeno)"
+                    st.markdown("> " + shown.replace("\n", "\n> "))
+            st.divider()
+
+
 def _render_reset_section():
     """⚠️ Reset — TRAJNO briše sve podatke o pacijentu. Dvostruka zaštita: dugme se
     aktivira tek kad se upiše reč RESET (da se izbegne slučajno brisanje)."""
@@ -2864,6 +2918,7 @@ def render_entry():
                 st.rerun()
 
         _render_vitals_archive()
+        _render_entries_archive()
 
     with t2:
         st.markdown("##### 📎 Otpremi lekarski izveštaj — AI izvuče dijagnoze")
