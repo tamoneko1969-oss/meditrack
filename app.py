@@ -1456,9 +1456,45 @@ SVAKA tvrdnja u focus/insights mora biti pokrivena stavkom u citations (Chain-of
 Citation). NE izmišljaj DOI. Piši na srpskom."""
 
 
+def full_lab_chronology() -> str:
+    """Kompletna vremenska osa SVIH lab nalaza — svaka vrednost sa datumom,
+    hronološki (staro → novo), po parametru. Da konzilijum vidi celu progresiju,
+    a ne samo poslednju vrednost ili sažetak trenda."""
+    tl = lab_timeline()
+    if not tl:
+        return "(nema laboratorijskih nalaza)"
+    lines = []
+    for canon in sorted(tl):
+        seq = " → ".join(f"{d}: {v:g} {u}".strip() for d, v, u in tl[canon])
+        lines.append(f"- {canon}: {seq}")
+    return "\n".join(lines)
+
+
+def doctor_reports_chronology(max_len: int = 800) -> str:
+    """Sve dijagnoze + PUN tekst mišljenja lekara i CT/MR/skener izveštaja,
+    hronološki po datumu sa dokumenta. Da konzilijum čita šta je lekar/radiolog
+    zaista napisao, a ne samo naziv dijagnoze."""
+    rows = q_all("SELECT diagnosis_name, doctor_report_text, date_diagnosed, status "
+                 "FROM medical_history ORDER BY date_diagnosed ASC, id ASC")
+    if not rows:
+        return "(nema dijagnoza ni izveštaja lekara)"
+    out = []
+    for r in rows:
+        rpt = (r["doctor_report_text"] or "").strip()
+        if len(rpt) > max_len:
+            rpt = rpt[:max_len] + " …(skraćeno)"
+        line = (f"- [{r['date_diagnosed']}] {r['diagnosis_name']} "
+                f"(status: {r['status'] or '—'})")
+        if rpt:
+            line += f"\n    Izveštaj/mišljenje lekara: {rpt}"
+        out.append(line)
+    return "\n".join(out)
+
+
 def clinical_data_bundle() -> str:
-    """Kompletan klinički paket za agente: profil + vremenska linija sa trend
-    velocity analizom + BP obrasci (3x dnevno) + dijagnoze."""
+    """Kompletan klinički paket za agente: profil + PUNA hronologija lab nalaza +
+    mišljenja lekara/CT izveštaji + trend velocity + BP obrasci (3x dnevno) +
+    eksplicitna instrukcija za hronološko-korelacionu analizu."""
     ctx = build_health_context()
     tv = trend_velocity()
     lines = []
@@ -1471,12 +1507,25 @@ def clinical_data_bundle() -> str:
     bp = bp_pattern_analysis(7)
     bp_lines = [f"  {p}: {a[0]}/{a[1]} mmHg" if a else f"  {p}: nema merenja"
                 for p, a in bp["averages"].items()]
-    return (f"{ctx}\n\nVREMENSKA LINIJA LAB PARAMETARA (Trend Velocity — ponderisana "
-            f"regresija, skoriji podaci teži):\n" + "\n".join(lines or ["- nema lab podataka"])
+    return (f"{ctx}\n\n"
+            "PUNA HRONOLOGIJA LAB NALAZA (SVE vrednosti, redom staro→novo po parametru):\n"
+            + full_lab_chronology()
+            + "\n\nDIJAGNOZE + MIŠLJENJA LEKARA / CT-MR-SKENER IZVEŠTAJI (hronološki):\n"
+            + doctor_reports_chronology()
+            + "\n\nVREMENSKA LINIJA LAB PARAMETARA (Trend Velocity — ponderisana "
+            "regresija, skoriji podaci teži):\n" + "\n".join(lines or ["- nema lab podataka"])
             + f"\n\nKRVNI PRITISAK — PROSECI PO DOBU DANA (poslednjih {bp['days']} dana, "
             f"{bp['readings']} merenja):\n" + "\n".join(bp_lines)
             + ("\nDETEKTOVANI OBRASCI:\n" + "\n".join(f"  ⚠ {p}" for p in bp["patterns"])
-               if bp["patterns"] else "\n(bez detektovanih BP obrazaca)"))
+               if bp["patterns"] else "\n(bez detektovanih BP obrazaca)")
+            + "\n\n=== NAČIN ANALIZE (OBAVEZNO) ===\n"
+            "Analiziraj SVE gore navedeno HRONOLOŠKI — kako su se vrednosti i nalazi "
+            "menjali kroz vreme (progresija, ne samo poslednja vrednost). UKRSTI "
+            "korelacije: između lab parametara, BP obrazaca, dijagnoza i mišljenja "
+            "lekara / CT-MR nalaza (npr. da li se pogoršanje jednog parametra vremenski "
+            "poklapa sa promenom drugog ili sa nalazom na snimku). Rizik-skorove, "
+            "zaključke i verdikt zasnuj na toj hronološko-korelacionoj analizi i "
+            "eksplicitno navedi ključne uočene korelacije i trendove kroz vreme.")
 
 
 def _agent_call(client, model_id: str, system: str, user_msg: str,
