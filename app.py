@@ -3028,6 +3028,8 @@ def render_entry():
 
     with t3:
         st.markdown("##### 📎 Otpremi nalaz (slika ili PDF) — AI pročita i upiše parametre")
+        st.caption("Možeš otpremiti više nalaza odjednom — biće poređani i obrađeni "
+                   "HRONOLOŠKI, od najstarijeg datuma (sa dokumenta) ka najnovijem.")
         lab_imgs = st.file_uploader(
             "Otpremi laboratorijski nalaz (slika ili PDF, može više)",
             type=["png", "jpg", "jpeg", "webp", "pdf"], accept_multiple_files=True,
@@ -3036,21 +3038,51 @@ def render_entry():
             if not api_ready:
                 st.warning("Unesi ANTHROPIC_API_KEY u ⚙️ (bočna traka) da bi AI pročitao nalaz.")
             elif st.button("🔍 Pročitaj i sačuvaj nalaze", type="primary", key="lab_analyze"):
+                # PROLAZ 1 — AI pročita svaki nalaz (bez čuvanja), uhvati datum sa dokumenta
+                analyzed, warns, auth_failed = [], [], False
                 for i, img in enumerate(lab_imgs, 1):
-                    if len(lab_imgs) > 1:
-                        st.markdown(f"**🖼️ Prilog {i} / {len(lab_imgs)}**")
                     try:
                         block, ocr_text = prepare_media(img)
-                        with st.spinner(f"AI čita nalaz… ({i})"):
+                        with st.spinner(f"AI čita nalaz {i}/{len(lab_imgs)}…"):
                             res = smart_analyze(block, ocr_text, model_id, api_key)
-                        doc = res.get("document")
-                        if doc and doc.get("lab_results"):
-                            _store_and_show_doc(doc)
+                        doc = res.get("document") or {}
+                        if doc.get("lab_results"):
+                            analyzed.append((_parse_finding_date(doc.get("finding_date")), i, doc))
                         else:
-                            st.warning(f"Prilog {i}: nisam prepoznao lab parametre. "
-                                       f"{res.get('notes') or ''} Probaj jasniji prilog.")
+                            warns.append(f"Prilog {i}: nisam prepoznao lab parametre. "
+                                         f"{res.get('notes') or ''}")
                     except Exception as e:  # noqa: BLE001
-                        st.error(f"Greška na prilogu {i}: {e}")
+                        em = str(e).lower()
+                        if "401" in em or "authentication" in em or "invalid x-api-key" in em:
+                            auth_failed = True
+                            break
+                        elif ("peer closed" in em or "incomplete chunked" in em
+                              or "connection" in em):
+                            warns.append(f"Prilog {i}: prekinuta veza sa serverom — najčešće "
+                                         "posledica neispravnog API ključa. Proveri ključ.")
+                        else:
+                            warns.append(f"Prilog {i}: {e}")
+
+                if auth_failed:
+                    st.error("❌ **API ključ nije važeći (greška 401).**\n\n"
+                             "Nalazi su stigli do aplikacije, ali ih je Claude odbio jer "
+                             "ANTHROPIC_API_KEY nije ispravan (nije problem do nalaza).\n\n"
+                             "Rešenje: generiši nov ključ na **console.anthropic.com → API "
+                             "Keys**, pa ga zameni na telefonu u **Streamlit Cloud → App → "
+                             "Settings → Secrets** (`ANTHROPIC_API_KEY`).")
+                else:
+                    # PROLAZ 2 — sortiraj hronološki (najstariji→najnoviji; bez datuma na kraj)
+                    analyzed.sort(key=lambda x: (x[0] is None, x[0] or ""))
+                    for pos, (fd, orig_i, doc) in enumerate(analyzed, 1):
+                        st.markdown(f"**🗓️ Nalaz {pos}/{len(analyzed)}** — datum: "
+                                    f"{fd or 'nepoznat'} (otpremljen kao prilog {orig_i})")
+                        _store_and_show_doc(doc)
+                        st.divider()
+                    for w in warns:
+                        st.warning(w)
+                    if analyzed:
+                        st.success(f"✅ Obrađeno {len(analyzed)} nalaza — hronološki, "
+                                   "od najstarijeg ka najnovijem.")
 
     st.divider()
     _render_reset_section()
