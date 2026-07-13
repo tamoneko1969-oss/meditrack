@@ -909,22 +909,36 @@ def check_red_flags() -> list[dict]:
 
 
 def render_red_flag_screen(flags: list[dict]) -> None:
-    """Dominantan kritičан ekran — blokira AI savete (tvrda brava izvan LLM-a)."""
+    """Crveni PULSIRAJUĆI ram koji sam nestane posle ~20 s. Prijavljuje kritičnu
+    anomaliju kao vidljivo upozorenje, ali NE zaključava aplikaciju — konzilijum i
+    ostale procene nastavljaju normalno."""
+    rc = VERDICT["RED"]
     items = "".join(
         f"<li style='margin:6px 0'><b>{f['title']}</b><br>"
         f"<span style='opacity:.85'>Izmereno: {f['value']}</span></li>" for f in flags)
     st.markdown(f"""
-    <div style='border:2px solid {VERDICT["RED"]};border-radius:22px;padding:26px;
-         background:{VERDICT["RED"]}22;box-shadow:0 0 40px {VERDICT["RED"]}55'>
-      <div style='font-size:1.6rem;font-weight:900;color:{VERDICT["RED"]}'>
-        ⛔ KRITIČNO UPOZORENJE</div>
-      <p style='margin:10px 0'>Detektovane su vrednosti u zoni akutne opasnosti.
-      <b>Svi nutritivni i lifestyle saveti su obustavljeni.</b>
-      Odmah se javi lekaru ili hitnoj službi (194).</p>
+    <style>
+    @keyframes mtRfPulse {{
+      0%,100% {{ box-shadow:0 0 0 0 {rc}66, 0 0 14px 2px {rc}55; }}
+      50%     {{ box-shadow:0 0 0 9px {rc}00, 0 0 34px 11px {rc}AA; }}
+    }}
+    @keyframes mtRfFade {{
+      0%,92% {{ opacity:1; }}
+      100%   {{ opacity:0; visibility:hidden; height:0; margin:0;
+                padding:0; border-width:0; overflow:hidden; }}
+    }}
+    .mt-redflag {{
+      border:2px solid {rc}; border-radius:22px; padding:22px 26px; margin-bottom:14px;
+      background:{rc}1F;
+      animation: mtRfPulse 1.15s ease-in-out infinite, mtRfFade 20s linear forwards;
+    }}
+    </style>
+    <div class='mt-redflag'>
+      <div style='font-size:1.5rem;font-weight:900;color:{rc}'>⛔ KRITIČNO UPOZORENJE</div>
+      <p style='margin:10px 0'>Analiza je otkrila vrednosti u zoni akutne opasnosti.
+      <b>Odmah se javi lekaru ili hitnoj službi (194).</b><br>
+      Konzilijum nastavlja analizu — ovo upozorenje se samo sklanja za 20 sekundi.</p>
       <ul style='padding-left:20px'>{items}</ul>
-      <p style='font-size:.8rem;opacity:.8'>Ova provera je ugrađena bezbednosna brava
-      (nezavisna od AI). Saveti se automatski otključavaju kad nove izmerene vrednosti
-      izađu iz kritične zone.</p>
     </div>""", unsafe_allow_html=True)
 
 
@@ -1757,8 +1771,6 @@ def ensure_supplement_plan(force: bool = False):
     dugmeta) — nikad automatski."""
     if not force or not api_ready:
         return None
-    if st.session_state.get("red_flags"):
-        return None  # kritično stanje — suplementi obustavljeni, isto kao hrana
     sig = data_signature()
     try:
         with st.spinner("💊 Agent Suplementolog analizira lab nalaze i konzilijum…"):
@@ -2176,29 +2188,27 @@ def render_dashboard():
 
     st.write("")
 
-    # --- RED FLAGS: dominantan kritičан ekran, blokira sve AI savete ---
+    # --- RED FLAGS: crveni PULSIRAJUĆI ram (~20 s) — NE zaključava; konzilijum ide dalje ---
     red_flags = st.session_state.get("red_flags") or []
     if red_flags:
         render_red_flag_screen(red_flags)
-        st.write("")
 
     # --- Dnevno stanje organizma — SAMO na zahtev (dugme „Konzilijum"), ---
     # --- više se NE saziva automatski posle svakog novog unosa. ---
-    report, is_stale = (None, False) if red_flags else load_cached_report()
-    if not red_flags:
-        if not api_ready:
-            st.info("Unesi ANTHROPIC_API_KEY (⚙️ levo) da bi mogao da sazoveš konzilijum.")
-        else:
-            if report and is_stale:
-                st.caption("📥 Ima novijih unosa od poslednjeg sazivanja konzilijuma.")
-            elif not report:
-                st.caption("Konzilijum (6 specijalista + nutricionista) još nije sazivan.")
-            if st.button("🧠 Konzilijum", key="run_konzilijum",
-                        type="primary", use_container_width=True):
-                report = run_consortium_and_save()
-                if report is not None:
-                    st.rerun()  # samo na uspeh — greška ostaje vidljiva ako pukne
-            st.write("")
+    report, is_stale = load_cached_report()
+    if not api_ready:
+        st.info("Unesi ANTHROPIC_API_KEY (⚙️ levo) da bi mogao da sazoveš konzilijum.")
+    else:
+        if report and is_stale:
+            st.caption("📥 Ima novijih unosa od poslednjeg sazivanja konzilijuma.")
+        elif not report:
+            st.caption("Konzilijum (6 specijalista + nutricionista) još nije sazivan.")
+        if st.button("🧠 Konzilijum", key="run_konzilijum",
+                    type="primary", use_container_width=True):
+            report = run_consortium_and_save()
+            if report is not None:
+                st.rerun()  # samo na uspeh — greška ostaje vidljiva ako pukne
+        st.write("")
 
     if report:
         dcol = VERDICT.get(str(report.get("overall", "YELLOW")).upper(), VERDICT["YELLOW"])
@@ -2389,12 +2399,10 @@ def render_dashboard():
     st.write("")
 
     # --- Suplementacija (sažeto — analiza SAMO na klik, nikad automatski) ---
-    sup, sup_stale = (None, False) if red_flags else _load_supplement_cached()
+    sup, sup_stale = _load_supplement_cached()
     n_sup = len(sup.get("supplements") or []) if sup else 0
     with st.expander(f"💊 Suplementacija ({n_sup} predloga)" if sup else "💊 Suplementacija"):
-        if red_flags:
-            st.caption("Obustavljeno dok je aktivno kritično upozorenje (Red Flag).")
-        elif not api_ready:
+        if not api_ready:
             st.caption("Unesi ANTHROPIC_API_KEY (⚙️ levo) da bi mogao da zatražiš predlog.")
         else:
             st.caption("Agent Suplementolog (NIH ODS / EFSA) čita tvoju lab istoriju, "
@@ -2467,11 +2475,6 @@ def _handle_scan_result(res: dict) -> bool:
         st.success(f"🩺 Prepoznato: merenje sa uređaja · pouzdanost {conf}.")
         _transfer_vitals_to_entry(res["vitals"])
     elif dt == "food_product" and res.get("food"):
-        if st.session_state.get("red_flags"):
-            # Tvrda brava: kod kritičnog stanja nutritivni saveti su obustavljeni
-            st.error("⛔ Kritično stanje detektovano (Red Flag) — nutritivni saveti su "
-                     "obustavljeni dok se vrednosti ne normalizuju. Javi se lekaru.")
-            return False
         st.success(f"🍎 Prepoznato: prehrambeni proizvod · pouzdanost {conf}.")
         _show_food_result(res["food"])
     elif dt == "medical_document" and res.get("document"):
