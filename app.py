@@ -3030,10 +3030,14 @@ def render_entry():
         st.markdown("##### 📎 Otpremi nalaz (slika ili PDF) — AI pročita i upiše parametre")
         st.caption("Možeš otpremiti više nalaza odjednom — biće poređani i obrađeni "
                    "HRONOLOŠKI, od najstarijeg datuma (sa dokumenta) ka najnovijem.")
+        _lab_msg = st.session_state.pop("_lab_saved_msg", None)
+        if _lab_msg:
+            st.success(_lab_msg)
+        st.session_state.setdefault("lab_uploader_v", 0)
         lab_imgs = st.file_uploader(
             "Otpremi laboratorijski nalaz (slika ili PDF, može više)",
             type=["png", "jpg", "jpeg", "webp", "pdf"], accept_multiple_files=True,
-            key="lab_upload")
+            key=f"lab_upload_{st.session_state['lab_uploader_v']}")
         if lab_imgs:
             if not api_ready:
                 st.warning("Unesi ANTHROPIC_API_KEY u ⚙️ (bočna traka) da bi AI pročitao nalaz.")
@@ -3071,18 +3075,22 @@ def render_entry():
                              "Keys**, pa ga zameni na telefonu u **Streamlit Cloud → App → "
                              "Settings → Secrets** (`ANTHROPIC_API_KEY`).")
                 else:
-                    # PROLAZ 2 — sortiraj hronološki (najstariji→najnoviji; bez datuma na kraj)
+                    # PROLAZ 2 — sačuvaj hronološki (najstariji→najnoviji; bez datuma na kraj)
                     analyzed.sort(key=lambda x: (x[0] is None, x[0] or ""))
-                    for pos, (fd, orig_i, doc) in enumerate(analyzed, 1):
-                        st.markdown(f"**🗓️ Nalaz {pos}/{len(analyzed)}** — datum: "
-                                    f"{fd or 'nepoznat'} (otpremljen kao prilog {orig_i})")
+                    for fd, orig_i, doc in analyzed:
                         _store_and_show_doc(doc)
-                        st.divider()
-                    for w in warns:
-                        st.warning(w)
-                    if analyzed:
-                        st.success(f"✅ Obrađeno {len(analyzed)} nalaza — hronološki, "
-                                   "od najstarijeg ka najnovijem.")
+                    if analyzed or warns:
+                        parts = []
+                        if analyzed:
+                            dates = ", ".join(fd or "nepoznat" for fd, _, _ in analyzed)
+                            parts.append(
+                                f"✅ Sačuvano {len(analyzed)} nalaza hronološki "
+                                f"(od najstarijeg): {dates}. Vidljivi su u „📁 Arhiva "
+                                "unosa“ (kartica „Vitalni znaci“).")
+                        parts += [f"⚠ {w}" for w in warns]
+                        st.session_state["_lab_saved_msg"] = "\n\n".join(parts)
+                        st.session_state["lab_uploader_v"] += 1  # očisti uploader posle čuvanja
+                        st.rerun()
 
     st.divider()
     _render_reset_section()
