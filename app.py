@@ -909,9 +909,9 @@ def check_red_flags() -> list[dict]:
 
 
 def render_red_flag_screen(flags: list[dict]) -> None:
-    """Crveni PULSIRAJUĆI ram koji sam nestane posle ~20 s. Prijavljuje kritičnu
-    anomaliju kao vidljivo upozorenje, ali NE zaključava aplikaciju — konzilijum i
-    ostale procene nastavljaju normalno."""
+    """Crveni ram koji PULSIRA prvih 20 s, pa pulsiranje prestaje ali ram OSTAJE
+    vidljiv (isti format, samo bez pulsiranja). Trajno vidljivo upozorenje na kritičnu
+    anomaliju, ali NE zaključava aplikaciju — konzilijum i ostale procene nastavljaju."""
     rc = VERDICT["RED"]
     items = "".join(
         f"<li style='margin:6px 0'><b>{f['title']}</b><br>"
@@ -922,22 +922,17 @@ def render_red_flag_screen(flags: list[dict]) -> None:
       0%,100% {{ box-shadow:0 0 0 0 {rc}66, 0 0 14px 2px {rc}55; }}
       50%     {{ box-shadow:0 0 0 9px {rc}00, 0 0 34px 11px {rc}AA; }}
     }}
-    @keyframes mtRfFade {{
-      0%,92% {{ opacity:1; }}
-      100%   {{ opacity:0; visibility:hidden; height:0; margin:0;
-                padding:0; border-width:0; overflow:hidden; }}
-    }}
     .mt-redflag {{
       border:2px solid {rc}; border-radius:22px; padding:22px 26px; margin-bottom:14px;
-      background:{rc}1F;
-      animation: mtRfPulse 1.15s ease-in-out infinite, mtRfFade 20s linear forwards;
+      background:{rc}1F; box-shadow:0 0 14px 2px {rc}55;
+      animation: mtRfPulse 1s ease-in-out 20;
     }}
     </style>
     <div class='mt-redflag'>
       <div style='font-size:1.5rem;font-weight:900;color:{rc}'>⛔ KRITIČNO UPOZORENJE</div>
       <p style='margin:10px 0'>Analiza je otkrila vrednosti u zoni akutne opasnosti.
       <b>Odmah se javi lekaru ili hitnoj službi (194).</b><br>
-      Konzilijum nastavlja analizu — ovo upozorenje se samo sklanja za 20 sekundi.</p>
+      Konzilijum nastavlja analizu — upozorenje ostaje prikazano (pulsira prvih 20 s).</p>
       <ul style='padding-left:20px'>{items}</ul>
     </div>""", unsafe_allow_html=True)
 
