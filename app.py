@@ -391,6 +391,7 @@ def init_db() -> None:
             id {pk}, src TEXT, rel TEXT, dst TEXT)""",
         """CREATE TABLE IF NOT EXISTS supplement_plans (
             id INTEGER PRIMARY KEY, generated_at TEXT, signature TEXT, content TEXT)""",
+        """CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT)""",
     ]
     conn = get_conn()
     try:
@@ -428,6 +429,30 @@ def seed_demo_data() -> None:
             ("Holesterol", 5.6, "mmol/L", "<5.2", "2025-05-20"),
         ],
     )
+
+
+def meta_get(key: str, default=None):
+    row = q_one("SELECT value FROM app_meta WHERE key = ?", (key,))
+    return row["value"] if row else default
+
+
+def meta_set(key: str, value: str) -> None:
+    q_exec("""INSERT INTO app_meta (key, value) VALUES (?, ?)
+              ON CONFLICT (key) DO UPDATE SET value = excluded.value""", (key, value))
+
+
+def wipe_all_patient_data(include_profile: bool = False) -> None:
+    """TRAJNO briše SVE podatke o pacijentu (merenja, lab nalazi, dijagnoze, lekovi,
+    istorija skeniranja) i keširane AI izveštaje (dnevno stanje, konzilijum,
+    suplementi). NE dira CKG (kliničko znanje, nije pacijentov podatak). Postavlja
+    'bootstrapped' da se demo podaci NE vrate na sledećem startu prazne baze."""
+    for tbl in ("user_vitals", "lab_results", "medical_history", "medications",
+                "scanned_products_log", "daily_reports", "consortium_reports",
+                "supplement_plans"):
+        q_exec(f"DELETE FROM {tbl}")
+    if include_profile:
+        q_exec("DELETE FROM user_profile")
+    meta_set("bootstrapped", "1")
 
 
 def latest_vitals():
@@ -1935,9 +1960,12 @@ if "view" not in st.session_state:
 inject_css(st.session_state["theme"])
 require_login()
 
-# Auto-seed na praznoj bazi (samo prvi put)
-if latest_vitals() is None and not q_one("SELECT 1 FROM lab_results LIMIT 1"):
-    seed_demo_data()
+# Auto-seed na praznoj bazi — SAMO prvi put ikad. Posle „Reset" opcije demo
+# podaci se NE vraćaju (bootstrapped flag je već postavljen).
+if meta_get("bootstrapped") != "1":
+    if latest_vitals() is None and not q_one("SELECT 1 FROM lab_results LIMIT 1"):
+        seed_demo_data()
+    meta_set("bootstrapped", "1")
 
 # KLINIČKA TRIJAŽA (Red Flags) — tvrda brava izvan LLM-a, na svako pokretanje
 st.session_state["red_flags"] = check_red_flags()
@@ -2756,6 +2784,38 @@ def _render_vitals_archive():
             st.divider()
 
 
+def _render_reset_section():
+    """⚠️ Reset — TRAJNO briše sve podatke o pacijentu. Dvostruka zaštita: dugme se
+    aktivira tek kad se upiše reč RESET (da se izbegne slučajno brisanje)."""
+    if st.session_state.pop("_just_reset", False):
+        for k in ("reset_confirm_text", "reset_wipe_profile"):
+            st.session_state.pop(k, None)
+        st.success("✅ Svi podaci su obrisani. Aplikacija je prazna i spremna za unos "
+                   "novih podataka o pacijentu.")
+    with st.expander("⚠️ Reset — obriši SVE podatke i počni ispočetka"):
+        st.error("Ovo TRAJNO briše sva merenja pritiska, laboratorijske nalaze, "
+                 "dijagnoze, lekove i istoriju skeniranja — aplikacija ostaje prazna. "
+                 "**Radnja se NE može poništiti.**")
+        wipe_profile = st.checkbox(
+            "Obriši i profil pacijenta (godine, pol, visina, težina) — čekiraj samo "
+            "ako je u pitanju POTPUNO nova osoba", key="reset_wipe_profile")
+        st.caption("Profil se podrazumevano zadržava jer je neophodan za sve AI "
+                   "procene; obriši ga samo za sasvim novog pacijenta.")
+        confirm = st.text_input("Da potvrdiš brisanje, upiši velikim slovima:  RESET",
+                                key="reset_confirm_text", placeholder="RESET")
+        can = confirm.strip().upper() == "RESET"
+        if not can:
+            st.caption("Dugme se aktivira kad upišeš **RESET**.")
+        if st.button("🗑 Obriši sve i počni ispočetka", type="primary",
+                     disabled=not can, use_container_width=True, key="reset_all_btn"):
+            wipe_all_patient_data(include_profile=wipe_profile)
+            for k in ("red_flags", "daily_insights", "prefill_vitals_active"):
+                st.session_state.pop(k, None)
+            st.session_state["_entry_saved"] = True   # očisti i polja forme na sledećem runu
+            st.session_state["_just_reset"] = True
+            st.rerun()
+
+
 def render_entry():
     # Posle čuvanja: očisti polja i prefill oznaku (pre kreiranja widgeta)
     if st.session_state.pop("_entry_saved", False):
@@ -2887,6 +2947,9 @@ def render_entry():
                                        f"{res.get('notes') or ''} Probaj jasniji prilog.")
                     except Exception as e:  # noqa: BLE001
                         st.error(f"Greška na prilogu {i}: {e}")
+
+    st.divider()
+    _render_reset_section()
 
 
 # =========================================================================== #
