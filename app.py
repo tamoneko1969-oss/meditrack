@@ -1548,24 +1548,32 @@ def full_lab_chronology() -> str:
     return "\n".join(lines)
 
 
-def doctor_reports_chronology(max_len: int = 800) -> str:
+def doctor_reports_chronology(max_len: int = 1200) -> str:
     """Sve dijagnoze + PUN tekst mišljenja lekara i CT/MR/skener izveštaja,
-    hronološki po datumu sa dokumenta. Da konzilijum čita šta je lekar/radiolog
-    zaista napisao, a ne samo naziv dijagnoze."""
+    hronološki po datumu sa dokumenta.
+    Više dijagnoza izvučenih iz ISTOG dokumenta dele isti tekst izveštaja, pa se
+    GRUPIŠU — inače bi se isti nalaz slao i do 9 puta u svakom od ~9 poziva
+    konzilijuma (šum za agente i nepotreban trošak)."""
     rows = q_all("SELECT diagnosis_name, doctor_report_text, date_diagnosed, status "
                  "FROM medical_history ORDER BY date_diagnosed ASC, id ASC")
     if not rows:
         return "(nema dijagnoza ni izveštaja lekara)"
-    out = []
+    groups, index = [], {}
     for r in rows:
         rpt = (r["doctor_report_text"] or "").strip()
-        if len(rpt) > max_len:
-            rpt = rpt[:max_len] + " …(skraćeno)"
-        line = (f"- [{r['date_diagnosed']}] {r['diagnosis_name']} "
-                f"(status: {r['status'] or '—'})")
+        key = (r["date_diagnosed"], rpt)
+        if key not in index:
+            index[key] = len(groups)
+            groups.append((r["date_diagnosed"], rpt, []))
+        groups[index[key]][2].append((r["diagnosis_name"], r["status"] or "—"))
+    out = []
+    for d, rpt, dxs in groups:
+        out.append(f"- [{d}] iz istog dokumenta, dijagnoza: {len(dxs)}")
+        for name, stt in dxs:
+            out.append(f"    • {name} (status: {stt})")
         if rpt:
-            line += f"\n    Izveštaj/mišljenje lekara: {rpt}"
-        out.append(line)
+            txt = rpt if len(rpt) <= max_len else rpt[:max_len] + " …(skraćeno)"
+            out.append(f"    Izveštaj/mišljenje lekara (za sve gore navedene): {txt}")
     return "\n".join(out)
 
 
@@ -1596,14 +1604,19 @@ def clinical_data_bundle() -> str:
             f"{bp['readings']} merenja):\n" + "\n".join(bp_lines)
             + ("\nDETEKTOVANI OBRASCI:\n" + "\n".join(f"  ⚠ {p}" for p in bp["patterns"])
                if bp["patterns"] else "\n(bez detektovanih BP obrazaca)")
+            + "\n\nKLINIČKI GRAF ZNANJA (CKG) — poznate patofiziološke veze između "
+            "parametara. Koristi ga kao MAPU pri traženju korelacija u podacima iznad:\n"
+            + ckg_context()
             + "\n\n=== NAČIN ANALIZE (OBAVEZNO) ===\n"
             "Analiziraj SVE gore navedeno HRONOLOŠKI — kako su se vrednosti i nalazi "
             "menjali kroz vreme (progresija, ne samo poslednja vrednost). UKRSTI "
             "korelacije: između lab parametara, BP obrazaca, dijagnoza i mišljenja "
             "lekara / CT-MR nalaza (npr. da li se pogoršanje jednog parametra vremenski "
-            "poklapa sa promenom drugog ili sa nalazom na snimku). Rizik-skorove, "
-            "zaključke i verdikt zasnuj na toj hronološko-korelacionoj analizi i "
-            "eksplicitno navedi ključne uočene korelacije i trendove kroz vreme.")
+            "poklapa sa promenom drugog ili sa nalazom na snimku). Pri tome PROVERI veze "
+            "iz CKG-a na KONKRETNIM podacima ovog pacijenta — potvrdi ih ili opovrgni "
+            "brojevima, ne prepisuj ih napamet. Rizik-skorove, zaključke i verdikt zasnuj "
+            "na toj hronološko-korelacionoj analizi i eksplicitno navedi ključne uočene "
+            "korelacije i trendove kroz vreme.")
 
 
 def _agent_call(client, model_id: str, system: str, user_msg: str,
@@ -1766,8 +1779,7 @@ def run_supplement_analysis(model_id: str, api_key: str) -> dict:
                        for n, r in (detail.get("sub_reports") or {}).items()},
         "resolution": detail.get("resolution", {}),
     }, ensure_ascii=False)
-    msg = (f"PODACI PACIJENTA:\n{bundle}\n\n"
-           f"KLINIČKI GRAF ZNANJA (CKG):\n{ckg_context()}\n\n"
+    msg = (f"PODACI PACIJENTA:\n{bundle}\n\n"   # CKG je već unutar bundle-a
            f"NALAZI/RIZICI IZ POSLEDNJEG KONZILIJUMA:\n{consortium_summary}\n\n"
            f"Predloži suplementaciju kao JSON prema strukturi.")
     with client.messages.stream(
