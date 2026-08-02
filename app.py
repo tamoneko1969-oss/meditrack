@@ -2007,8 +2007,33 @@ def smart_analyze(media_block: dict, ocr_text: str, model_id: str, api_key: str)
 # --------------------------------------------------------------------------- #
 #  Inicijalizacija stanja
 # --------------------------------------------------------------------------- #
-init_db()
-seed_ckg()
+def render_db_down(err: Exception) -> None:
+    """Jasan ekran umesto sirovog tracebacka kad baza nije dostupna.
+    Najčešći uzrok: Supabase besplatni projekat se AUTOMATSKI PAUZIRA posle
+    perioda neaktivnosti. Podaci NISU izgubljeni — projekat se samo vrati."""
+    msg = str(err).lower()
+    paused = any(s in msg for s in
+                 ("tenant", "not found", "could not translate", "does not exist",
+                  "name or service not known", "timeout", "refused"))
+    st.markdown("## 🔌 Baza podataka trenutno nije dostupna")
+    st.error("Aplikacija ne može da se poveže sa bazom, pa privremeno ne može "
+             "da čita ni upisuje podatke. **Tvoji podaci NISU izgubljeni.**")
+    if paused:
+        st.markdown(
+            "**Najverovatniji uzrok:** Supabase besplatni projekat se sam "
+            "**pauzira** posle perioda neaktivnosti.\n\n"
+            "**Kako se rešava (traje ~2 minuta):**\n"
+            "1. Otvori **supabase.com** i uloguj se\n"
+            "2. Izaberi projekat **Meditrack**\n"
+            "3. Ako piše *Paused*, klikni **Restore / Resume project**\n"
+            "4. Sačekaj minut, pa se vrati ovde i klikni dugme ispod")
+    if st.button("🔄 Pokušaj ponovo", type="primary"):
+        st.rerun()
+    with st.expander("Tehnički detalji (za dijagnostiku)"):
+        st.code(str(err)[:600] or "nepoznata greška")
+    st.stop()
+
+
 if "theme" not in st.session_state:
     st.session_state["theme"] = "light"
 if "view" not in st.session_state:
@@ -2016,15 +2041,21 @@ if "view" not in st.session_state:
 inject_css(st.session_state["theme"])
 require_login()
 
-# Auto-seed na praznoj bazi — SAMO prvi put ikad. Posle „Reset" opcije demo
-# podaci se NE vraćaju (bootstrapped flag je već postavljen).
-if meta_get("bootstrapped") != "1":
-    if latest_vitals() is None and not q_one("SELECT 1 FROM lab_results LIMIT 1"):
-        seed_demo_data()
-    meta_set("bootstrapped", "1")
+try:
+    init_db()
+    seed_ckg()
 
-# KLINIČKA TRIJAŽA (Red Flags) — tvrda brava izvan LLM-a, na svako pokretanje
-st.session_state["red_flags"] = check_red_flags()
+    # Auto-seed na praznoj bazi — SAMO prvi put ikad. Posle „Reset" opcije demo
+    # podaci se NE vraćaju (bootstrapped flag je već postavljen).
+    if meta_get("bootstrapped") != "1":
+        if latest_vitals() is None and not q_one("SELECT 1 FROM lab_results LIMIT 1"):
+            seed_demo_data()
+        meta_set("bootstrapped", "1")
+
+    # KLINIČKA TRIJAŽA (Red Flags) — detekcija izvan LLM-a, na svako pokretanje
+    st.session_state["red_flags"] = check_red_flags()
+except Exception as _db_err:  # noqa: BLE001
+    render_db_down(_db_err)
 
 
 # --------------------------------------------------------------------------- #
