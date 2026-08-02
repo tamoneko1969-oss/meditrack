@@ -378,7 +378,8 @@ def init_db() -> None:
         f"""CREATE TABLE IF NOT EXISTS medications (
             id {pk}, medication_name TEXT NOT NULL, active_substance TEXT,
             dosage_text TEXT, form TEXT, purpose TEXT,
-            status TEXT NOT NULL DEFAULT 'active', source TEXT, added_at TEXT NOT NULL)""",
+            status TEXT NOT NULL DEFAULT 'active', source TEXT, added_at TEXT NOT NULL,
+            clinical_info TEXT)""",
         f"""CREATE TABLE IF NOT EXISTS user_profile (
             id INTEGER PRIMARY KEY, age INTEGER, height_cm INTEGER,
             weight_kg {real}, sex TEXT, updated_at TEXT)""",
@@ -398,6 +399,14 @@ def init_db() -> None:
         cur = conn.cursor()
         for s in stmts:
             cur.execute(s)
+        # Migracija: kolone dodate naknadno (CREATE TABLE IF NOT EXISTS ih NE dodaje
+        # na već postojeću tabelu, npr. na produkcijskoj Supabase bazi).
+        if IS_PG:
+            cur.execute("ALTER TABLE medications ADD COLUMN IF NOT EXISTS clinical_info TEXT")
+        else:
+            cur.execute("PRAGMA table_info(medications)")
+            if "clinical_info" not in {r[1] for r in cur.fetchall()}:
+                cur.execute("ALTER TABLE medications ADD COLUMN clinical_info TEXT")
         conn.commit()
     finally:
         conn.close()
@@ -481,11 +490,16 @@ def active_medications():
     )
 
 
-def add_medication(name, substance, dosage, form, purpose, source="scan") -> None:
+def add_medication(name, substance, dosage, form, purpose, source="scan",
+                   clinical=None) -> None:
+    """`clinical` je strukturisan sažetak IZ UPUTSTVA (kontraindikacije, bubrezi,
+    interakcije, šta pratiti…) — čuva se kao JSON i ide konzilijumu pri svakoj analizi."""
     q_exec(
         """INSERT INTO medications (medication_name, active_substance, dosage_text,
-           form, purpose, status, source, added_at) VALUES (?,?,?,?,?,'active',?,?)""",
-        (name, substance, dosage, form, purpose, source, datetime.now().isoformat()),
+           form, purpose, status, source, added_at, clinical_info)
+           VALUES (?,?,?,?,?,'active',?,?,?)""",
+        (name, substance, dosage, form, purpose, source, datetime.now().isoformat(),
+         json.dumps(clinical, ensure_ascii=False) if clinical else None),
     )
 
 
@@ -1129,6 +1143,62 @@ def _repair_json_fallback(raw: str) -> dict:
     return json.loads(s)
 
 
+def _row_get(row, key, default=None):
+    """Bezbedno čitanje kolone (sqlite3.Row podiže IndexError za nepostojeći ključ)."""
+    try:
+        v = row[key]
+    except (KeyError, IndexError):
+        return default
+    return default if v is None else v
+
+
+def meds_context_block(meds, max_items: int = 10, max_len: int = 160) -> str:
+    """Lekovi za AI kontekst — uključuje i klinički sažetak IZ UPUTSTVA (kontraindikacije,
+    bubrezi/jetra, interakcije, šta pratiti). Kompaktno, jer ovaj tekst ulazi u SVAKI
+    poziv konzilijuma (~9 poziva), pa duži tekst košta i pravi šum."""
+    if not meds:
+        return "nema unetih lekova"
+
+    def clip(s):
+        s = " ".join(str(s or "").split())
+        return s if len(s) <= max_len else s[:max_len] + "…"
+
+    def items(v):
+        if isinstance(v, list):
+            return "; ".join(clip(x) for x in v[:max_items] if str(x).strip())
+        return clip(v)
+
+    out = []
+    for m in meds:
+        head = str(_row_get(m, "medication_name", "") or "")
+        if _row_get(m, "active_substance"):
+            head += f" ({m['active_substance']})"
+        if _row_get(m, "dosage_text"):
+            head += f", {m['dosage_text']}"
+        if _row_get(m, "purpose"):
+            head += f" — {clip(m['purpose'])}"
+        lines = [f"- {head}"]
+        try:
+            cl = json.loads(_row_get(m, "clinical_info") or "null")
+        except (ValueError, TypeError):
+            cl = None
+        if isinstance(cl, dict):
+            for label, key in (("BUBREZI", "renal"), ("JETRA", "hepatic"),
+                               ("kontraindikacije", "contraindications"),
+                               ("upozorenja", "warnings"),
+                               ("interakcije", "interactions"),
+                               ("lab. neželjena dejstva", "lab_effects"),
+                               ("pratiti", "monitoring"),
+                               ("hrana/alkohol", "food_alcohol"),
+                               ("pomoćne supstance", "excipients")):
+                val = items(cl.get(key))
+                if val:
+                    lines.append(f"    · {label}: {val}")
+            lines.append("    (podaci iz zvaničnog uputstva proizvođača)")
+        out.append("\n".join(lines))
+    return "\n".join(out)
+
+
 def build_health_context() -> str:
     """Skuplja kompletan zdravstveni kontekst korisnika za AI ukrštanje.
     Lični profil (godine/visina/težina/BMI) je OBAVEZAN okvir za svaki savet."""
@@ -1161,27 +1231,26 @@ def build_health_context() -> str:
         or "nema lab nalaza"
     )
     hr = v["heart_rate"] if v else "—"
-    meds_list = (
-        "; ".join(
-            f"{m['medication_name']}"
-            + (f" ({m['active_substance']})" if m["active_substance"] else "")
-            + (f", {m['dosage_text']}" if m["dosage_text"] else "")
-            for m in meds
-        )
-        or "nema unetih lekova"
-    )
+    meds_list = meds_context_block(meds)
     return (
         f"LIČNI PROFIL (OBAVEZNO uzeti u obzir za SVAKI savet, dozu, normu i procenu): {prof}\n"
         f"KRVNI PRITISAK (poslednji): {bp}\n"
         f"PULS U MIROVANJU: {hr} bpm\n"
         f"AKTIVNE DIJAGNOZE: {dx_list}\n"
         f"LABORATORIJSKI NALAZI (poslednji): {lab_list}\n"
-        f"LEKOVI KOJE KORISNIK TRENUTNO KORISTI: {meds_list}\n"
+        f"LEKOVI KOJE KORISNIK TRENUTNO KORISTI (sa podacima iz zvaničnog uputstva):\n"
+        f"{meds_list}\n"
         f"PRAVILO: Svaku procenu, preporuku i pretragu prilagodi OVOM osobi — "
         f"njenim godinama, telesnoj masi (BMI) i polu. Norme i porcije računaj po "
         f"kg telesne mase gde je relevantno. Ne daj generičke savete. UVEK proveri "
         f"moguću interakciju predloga (hrana/suplement/savet) sa lekovima koje "
-        f"korisnik već koristi i eksplicitno je pomeni ako postoji."
+        f"korisnik već koristi i eksplicitno je pomeni ako postoji.\n"
+        f"PRAVILO ZA LEKOVE: podaci iz uputstva (kontraindikacije, bubrezi/jetra, "
+        f"interakcije, šta pratiti) su ZVANIČNI izvor proizvođača — imaju PREDNOST nad "
+        f"tvojim opštim znanjem. UKRSTI ih sa korisnikovim nalazima i dijagnozama: ako "
+        f"neko upozorenje ili neželjeno dejstvo iz uputstva odgovara njegovom aktuelnom "
+        f"nalazu (npr. bubrežna funkcija, jetreni enzimi, mišićni ili metabolički "
+        f"parametri), eksplicitno navedi tu vezu i šta bi trebalo pratiti."
     )
 
 
@@ -1926,7 +1995,18 @@ VRATI ISKLJUČIVO validan JSON (bez markdown ograda):
     "active_substance": "<aktivna supstanca (INN naziv) ili null>",
     "dosage_text": "<jačina/doza, npr. '20 mg' ili '50mg/5ml', ili null>",
     "form": "<tableta|kapsula|sirup|injekcija|mast|kapi|ostalo>",
-    "purpose": "<terapijska grupa/namena ako je vidljiva na pakovanju, inače null>",
+    "purpose": "<terapijska grupa/namena, npr. 'statin — snižava holesterol', ili null>",
+    "clinical": {
+      "renal": "<šta uputstvo kaže o bubrezima/bubrežnoj funkciji i doziranju, ili null>",
+      "hepatic": "<šta kaže o jetri i jetrenim enzimima, ili null>",
+      "contraindications": ["<kada se NE sme uzimati>"],
+      "warnings": ["<upozorenja i mere opreza>"],
+      "interactions": ["<lekovi/supstance koje utiču na dejstvo ili povećavaju rizik>"],
+      "lab_effects": ["<neželjena dejstva vidljiva u LABORATORIJI, npr. porast jetrenih enzima, CK, šećera>"],
+      "monitoring": ["<koje analize/parametre treba pratiti tokom terapije>"],
+      "food_alcohol": "<hrana/piće/alkohol upozorenja, npr. grejpfrut, ili null>",
+      "excipients": "<pomoćne supstance bitne za pacijenta (npr. sadržaj natrijuma, laktoza), ili null>"
+    } | null,
     "notes": "<kratko šta si pročitao>"
   } | null,
   "notes": "<poruka korisniku na srpskom>"
@@ -1945,6 +2025,12 @@ PRAVILA za food: NE generička recenzija — ukrsti sa korisnikovim pritiskom, d
 i lab nalazima (visok natrijum + povišen pritisak → RED/YELLOW, itd.).
 PRAVILA za medication: Čitaj TAČNO naziv i jačinu sa kutije/blistera/uputstva —
 ne pogađaj. Ako aktivna supstanca nije eksplicitno napisana, ostavi null (ne izmišljaj).
+Ako je priloženo UPUTSTVO ZA LEK (Gebrauchsinformation / packungsbeilage / uputstvo),
+popuni i objekat "clinical" — prepiši SUŠTINU iz uputstva (ne prepričavaj napamet):
+kontraindikacije, upozorenja (posebno BUBREZI i JETRA), interakcije, neželjena dejstva
+koja se vide u laboratoriji, šta pratiti, hrana/alkohol i pomoćne supstance. Uputstvo je
+često na nemačkom — PREVEDI na srpski. Piši kratko i konkretno (svaka stavka 1 rečenica).
+Ako uputstvo nije priloženo (samo kutija), stavi "clinical": null.
 PRAVILA za medical_document: OBAVEZNO pronađi DATUM kada je nalaz urađen (datum
 uzorkovanja/analize/izveštaja — obično u zaglavlju dokumenta) i upiši ga u finding_date
 u formatu YYYY-MM-DD. Taj datum je KLJUČAN da konzilijum prati hronologiju zdravlja —
@@ -2417,10 +2503,41 @@ def render_dashboard():
                     if st.button("🗑️", key=f"stop_med_{med['id']}"):
                         stop_medication(med["id"])
                         st.rerun()
+                try:
+                    cl = json.loads(_row_get(med, "clinical_info") or "null")
+                except (ValueError, TypeError):
+                    cl = None
+                if isinstance(cl, dict):
+                    with st.expander("📄 Iz uputstva proizvođača"):
+                        for label, key in (("🫘 Bubrezi", "renal"), ("🫓 Jetra", "hepatic"),
+                                           ("⛔ Kontraindikacije", "contraindications"),
+                                           ("⚠️ Upozorenja", "warnings"),
+                                           ("🔗 Interakcije", "interactions"),
+                                           ("🧪 Vidljivo u laboratoriji", "lab_effects"),
+                                           ("👁 Pratiti", "monitoring"),
+                                           ("🍽 Hrana / alkohol", "food_alcohol"),
+                                           ("🧂 Pomoćne supstance", "excipients")):
+                            val = cl.get(key)
+                            if not val:
+                                continue
+                            st.markdown(f"**{label}**")
+                            if isinstance(val, list):
+                                for x in val:
+                                    if str(x).strip():
+                                        st.markdown(f"- {x}")
+                            else:
+                                st.markdown(f"- {val}")
+                        st.caption("Ovi podaci ulaze u SVAKU procenu konzilijuma.")
+                else:
+                    st.caption("ℹ️ Bez podataka iz uputstva — skeniraj i uputstvo "
+                               "(Gebrauchsinformation) da konzilijum dobije "
+                               "kontraindikacije, interakcije i šta pratiti.")
+                st.divider()
         else:
             st.caption("Nema unetih lekova.")
-        st.caption("📷 Skeniraj kutiju/uputstvo leka preko Smart Camere da ga dodaš — "
-                   "aplikacija ga automatski uzima u obzir u svim procenama.")
+        st.caption("📷 Skeniraj kutiju **i uputstvo** leka preko Smart Camere — "
+                   "uputstvo daje kontraindikacije, interakcije i šta pratiti, "
+                   "pa konzilijum radi na zvaničnom izvoru proizvođača.")
 
     st.write("")
 
@@ -2522,9 +2639,10 @@ def _store_and_show_medication(med: dict):
     zajednički kontekst (build_health_context) koji već čita ceo mozak
     (konzilijum, food verdict, dnevno stanje) — „ispod haube", bez posebnog koraka."""
     name = med.get("medication_name") or "Nepoznat lek"
+    clinical = med.get("clinical") or None
     add_medication(
         name, med.get("active_substance"), med.get("dosage_text"),
-        med.get("form"), med.get("purpose"), source="scan",
+        med.get("form"), med.get("purpose"), source="scan", clinical=clinical,
     )
     dose = f" · {med['dosage_text']}" if med.get("dosage_text") else ""
     sub = f" ({med['active_substance']})" if med.get("active_substance") else ""
