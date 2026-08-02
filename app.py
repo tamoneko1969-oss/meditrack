@@ -670,10 +670,33 @@ LOINC_MAP = {
     "Holesterol":  {"loinc": "2093-3",  "unit": "mmol/L", "bad": "up",
                     "syn": ["holesterol", "cholesterin", "cholesterol ukupni",
                             "cholesterol"], "ref": (0, 5.2), "convert": {"mg/dl": 1 / 38.67}},
+    # PAŽNJA: „LDL-holesterol" sadrži reč „holesterol", pa mu sinonimi MORAJU biti
+    # duži/precizniji od „holesterol" — inače bi LDL/HDL/non-HDL svi upali u
+    # zajedničku liniju „Holesterol" i trend bi bio besmislen.
     "LDL":         {"loinc": "13457-7", "unit": "mmol/L", "bad": "up",
-                    "syn": ["ldl"], "ref": (0, 3.0), "convert": {"mg/dl": 1 / 38.67}},
+                    "syn": ["ldl-holesterol", "ldl holesterol", "ldl-cholesterin",
+                            "ldl cholesterol", "ldl-c", "ldl"],
+                    "ref": (0, 3.0), "convert": {"mg/dl": 1 / 38.67}},
     "HDL":         {"loinc": "2085-9",  "unit": "mmol/L", "bad": "down",
-                    "syn": ["hdl"], "ref": (1.0, 3.0), "convert": {"mg/dl": 1 / 38.67}},
+                    "syn": ["hdl-holesterol", "hdl holesterol", "hdl-cholesterin",
+                            "hdl cholesterol", "hdl-c", "hdl"],
+                    "ref": (1.0, 3.0), "convert": {"mg/dl": 1 / 38.67}},
+    "Non-HDL holesterol": {"loinc": "43396-1", "unit": "mmol/L", "bad": "up",
+                    "syn": ["non-hdl-holesterol", "non-hdl holesterol",
+                            "non hdl-holesterol", "non hdl holesterol",
+                            "nicht-hdl-cholesterin", "non-hdl", "non hdl"],
+                    "ref": (0, 3.4), "convert": {"mg/dl": 1 / 38.67}},
+    # Količnici su BEZDIMENZIONI — ne smeju da se mešaju sa koncentracijama.
+    "Holesterol/HDL odnos": {"loinc": "9830-1", "unit": "", "bad": "up",
+                    "syn": ["holesterol-hdl kvocijent", "holesterol/hdl kvocijent",
+                            "holesterol-hdl", "holesterol/hdl", "cholesterin/hdl"],
+                    "ref": (0, 5.0)},
+    "LDL/HDL odnos": {"loinc": "11054-4", "unit": "", "bad": "up",
+                    "syn": ["ldl-hdl kvocijent", "ldl/hdl kvocijent",
+                            "ldl-hdl", "ldl/hdl"], "ref": (0, 3.5)},
+    "Trigliceridi/HDL odnos": {"loinc": "-", "unit": "", "bad": "up",
+                    "syn": ["trigliceridi/hdl", "trigliceridi-hdl",
+                            "triglyceride/hdl"], "ref": (0, 2.75)},
     "Trigliceridi": {"loinc": "2571-8", "unit": "mmol/L", "bad": "up",
                     "syn": ["triglicerid", "triglyzerid", "triglyceride"],
                     "ref": (0, 1.7), "convert": {"mg/dl": 1 / 88.57}},
@@ -693,6 +716,18 @@ LOINC_MAP = {
                     "convert": {"µg/dl": 0.179, "ug/dl": 0.179}},
     "Feritin":     {"loinc": "2276-4",  "unit": "µg/L",   "bad": "down",
                     "syn": ["feritin", "ferritin"], "ref": (30, 400)},
+    # --- Metabolizam gvožđa: bez ovih hematolog vidi samo gvožđe i feritin ---
+    "Transferrin": {"loinc": "3034-6",  "unit": "mg/dL",  "bad": "up",
+                    "syn": ["transferrin", "transferin"], "ref": (200, 360)},
+    "Zasićenje transferrina": {"loinc": "2502-3", "unit": "%", "bad": "down",
+                    "syn": ["zasićenje transferrina", "zasicenje transferina",
+                            "saturacija transferrina", "saturacija transferina",
+                            "transferrinsättigung", "transferrinsattigung",
+                            "transferrin saturation", "tsat"], "ref": (16, 45)},
+    "Ukupni kapacitet vezivanja gvožđa": {"loinc": "2500-7", "unit": "µg/dL", "bad": "up",
+                    "syn": ["kapacitet vezivanja", "ukupni kapacitet vezivanja",
+                            "eisenbindungskapazität", "eisenbindungskapazitat",
+                            "iron binding", "tibc"], "ref": (268, 436)},
     "Vitamin B12": {"loinc": "2132-9",  "unit": "ng/L",   "bad": "down",
                     "syn": ["b12", "kobalamin", "cobalamin"], "ref": (197, 771)},
     "Folna kiselina": {"loinc": "2284-8", "unit": "µg/L", "bad": "down",
@@ -728,21 +763,44 @@ LOINC_MAP = {
     "Protein u urinu": {"loinc": "2888-6", "unit": "mg/dL", "bad": "up",
                     "syn": ["protein u urinu", "proteinurija", "eiweiß im urin"],
                     "ref": (0, 15)},
+    # Urin — ni jedan smer nije sam po sebi loš (kontekst: kamen, koncentrisanost),
+    # zato "both": flaguje se izrazito odstupanje u BILO kom smeru.
+    "pH urina":    {"loinc": "5803-2",  "unit": "",       "bad": "both",
+                    "syn": ["ph urina", "urin - ph", "urin-ph", "ph im urin",
+                            "urine ph", "ph-wert urin"], "ref": (4.5, 8.0)},
+    "Specifična težina urina": {"loinc": "5811-5", "unit": "", "bad": "both",
+                    "syn": ["specifična težina urina", "specificna tezina urina",
+                            "urin - specifična težina", "urin - specificna tezina",
+                            "spezifisches gewicht", "specific gravity"],
+                    "ref": (1005, 1030)},
 }
 
 
 def normalize_param(name: str) -> str:
-    """Mapira naziv parametra (sr/de/en varijante) na kanonski naziv iz LOINC_MAP."""
+    """Mapira naziv parametra (sr/de/en varijante) na kanonski naziv iz LOINC_MAP.
+    Bira NAJPRECIZNIJI pogodak, ne prvi — inače bi „Transferrin" i „Zasićenje
+    transferrina" (gde je jedno podniz drugog) završili pod istim parametrom.
+    Sinonim sadržan u nazivu je jači signal od obrnutog slučaja."""
     n = (name or "").strip().lower()
     if not n:
         return name
+    best, best_score = None, 0
     for canon, meta in LOINC_MAP.items():
         if canon.lower() == n:
             return canon
         for s in meta["syn"]:
-            if s in n or n in s:
-                return canon
-    return name.strip()
+            s = (s or "").strip().lower()
+            if not s:
+                continue
+            if s in n:
+                score = 2 * len(s)      # „gvožđe" u „gvožđe u serumu" — jak signal
+            elif n in s:
+                score = len(n)          # obrnuto — slabiji signal
+            else:
+                continue
+            if score > best_score:
+                best, best_score = canon, score
+    return best or name.strip()
 
 
 def canon_value(canon: str, value: float, unit: str) -> tuple[float, str]:
